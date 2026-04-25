@@ -35,6 +35,77 @@ This repo is set up so a new user can:
 - `ROADMAP.md` - planned work and gaps
 - `src/` and `tests/` - companion Python/reference surfaces that should stay aligned with runtime behavior
 
+## Tool Call Surface
+
+This distribution exposes a broader tool surface than the basic shell-plus-file-editing baseline. The current built-in tool registry in [`rust/crates/tools/src/lib.rs`](./rust/crates/tools/src/lib.rs) includes:
+
+Core workspace tools:
+
+- `bash`
+- `read_file`
+- `write_file`
+- `edit_file`
+- `glob_search`
+- `grep_search`
+- `PowerShell`
+- `REPL`
+- `NotebookEdit`
+
+Web and research tools:
+
+- `WebFetch`
+- `WebSearch`
+- `ToolSearch`
+
+Planning and session workflow tools:
+
+- `TodoWrite`
+- `Skill`
+- `Config`
+- `Sleep`
+- `SendUserMessage`
+- `StructuredOutput`
+- `EnterPlanMode`
+- `ExitPlanMode`
+- `AskUserQuestion`
+
+Agent and worker orchestration tools:
+
+- `Agent`
+- `TaskCreate`
+- `RunTaskPacket`
+- `TaskGet`
+- `TaskList`
+- `TaskStop`
+- `TaskUpdate`
+- `TaskOutput`
+- `WorkerCreate`
+- `WorkerGet`
+- `WorkerObserve`
+- `WorkerResolveTrust`
+- `WorkerAwaitReady`
+
+Additional runtime and integration surfaces exercised by the tool audit harness in [`rust/crates/tools/src/bin/tool_audit.rs`](./rust/crates/tools/src/bin/tool_audit.rs):
+
+- `WorkerSendPrompt`
+- `WorkerRestart`
+- `WorkerObserveCompletion`
+- `WorkerTerminate`
+- `TeamCreate`
+- `TeamDelete`
+- `CronCreate`
+- `CronList`
+- `CronDelete`
+- `LSP`
+- `ListMcpResources`
+- `ReadMcpResource`
+- `McpAuth`
+- `MCP`
+- `RemoteTrigger`
+- `TestingPermission`
+
+Not every tool is available in every environment. Some require configured MCP servers, worker state, cron/team state, local runtimes, or provider/network access. The important point for new users is that this repo is not just a thin wrapper around shell commands: it includes web fetch/search, notebook editing, structured task tracking, agent/task orchestration, worker lifecycle tools, and MCP-facing integration hooks.
+
 ## Quick Start
 
 ### Windows: run the bundled binary
