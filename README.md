@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/claw-hero.jpeg" alt="ClawCodex hero image" width="300" />
+  <img src="clawcodex.png" alt="ClawCodex hero image" width="300" />
 </p>
 
 ClawCodex is a packaged distribution of the `claw` CLI agent harness with the Rust workspace in [`rust/`](./rust) and a bundled Windows binary in [`bin/windows/claw.exe`](./bin/windows/claw.exe).
