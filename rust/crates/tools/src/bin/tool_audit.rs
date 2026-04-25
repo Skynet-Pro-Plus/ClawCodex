@@ -276,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "objective": "Audit packet",
             "scope": "module",
             "scope_path": "tools",
-            "repo": "johnny",
+            "repo": "ClawCodex",
             "worktree": repo_root.display().to_string(),
             "branch_policy": "main only",
             "acceptance_tests": ["cargo build -p rusty-claude-cli"],

@@ -551,7 +551,7 @@ fn wsl_mnt_drive_path_to_windows(_path: &str) -> Option<PathBuf> {
     None
 }
 
-/// Repair paths like `D:\d\Johnny\...` or `\\?\D:\d\Johnny\...` produced when
+/// Repair paths like `D:\d\ClawCodex\...` or `\\?\D:\d\ClawCodex\...` produced when
 /// MSYS-style `/d/...` was incorrectly joined onto a Windows cwd.
 #[cfg(windows)]
 fn repair_windows_double_drive_segment(path: &str) -> Option<PathBuf> {
@@ -801,10 +801,10 @@ mod tests {
     #[test]
     fn maps_git_bash_drive_paths_to_windows_roots() {
         let mapped =
-            super::unix_msys_style_drive_path_to_windows("/d/Johnny/Johnny/hellp_world.html")
+            super::unix_msys_style_drive_path_to_windows("/d/ClawCodex/ClawCodex/hellp_world.html")
                 .expect("msys-style path should map");
         let normalized = mapped.to_string_lossy().replace('\\', "/");
-        assert_eq!(normalized, "D:/Johnny/Johnny/hellp_world.html");
+        assert_eq!(normalized, "D:/ClawCodex/ClawCodex/hellp_world.html");
     }
 
     #[test]
@@ -824,10 +824,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn maps_wsl_mnt_paths_to_windows_roots() {
-        let mapped = super::wsl_mnt_drive_path_to_windows("/mnt/d/Johnny/Johnny/hello.html")
+        let mapped = super::wsl_mnt_drive_path_to_windows("/mnt/d/ClawCodex/ClawCodex/hello.html")
             .expect("wsl /mnt path should map");
         let normalized = mapped.to_string_lossy().replace('\\', "/");
-        assert_eq!(normalized, "D:/Johnny/Johnny/hello.html");
+        assert_eq!(normalized, "D:/ClawCodex/ClawCodex/hello.html");
     }
 
     #[cfg(windows)]
@@ -843,23 +843,23 @@ mod tests {
     #[test]
     fn repairs_mangled_verbatim_windows_path() {
         let mapped =
-            super::repair_windows_double_drive_segment(r"\\?\D:\d\Johnny\Johnny\hello_worlds.html")
+            super::repair_windows_double_drive_segment(r"\\?\D:\d\ClawCodex\ClawCodex\hello_worlds.html")
                 .expect("verbatim mangled path should repair");
         let s = mapped.to_string_lossy();
         assert!(
-            s.ends_with(r"D:\Johnny\Johnny\hello_worlds.html")
-                || s.ends_with(r"D:/Johnny/Johnny/hello_worlds.html")
+            s.ends_with(r"D:\ClawCodex\ClawCodex\hello_worlds.html")
+                || s.ends_with(r"D:/ClawCodex/ClawCodex/hello_worlds.html")
         );
-        assert!(!s.contains(r"D:\d\Johnny"));
+        assert!(!s.contains(r"D:\d\ClawCodex"));
     }
 
     #[cfg(windows)]
     #[test]
     fn repairs_mangled_non_verbatim_windows_path() {
-        let mapped = super::repair_windows_double_drive_segment(r"D:\d\Johnny\Johnny\file.html")
+        let mapped = super::repair_windows_double_drive_segment(r"D:\d\ClawCodex\ClawCodex\file.html")
             .expect("non-verbatim mangled path should repair");
         let normalized = mapped.to_string_lossy().replace('\\', "/");
-        assert_eq!(normalized, "D:/Johnny/Johnny/file.html");
+        assert_eq!(normalized, "D:/ClawCodex/ClawCodex/file.html");
     }
 
     #[cfg(windows)]

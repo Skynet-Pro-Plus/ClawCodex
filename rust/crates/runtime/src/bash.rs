@@ -566,35 +566,35 @@ mod shell_rewrite_tests {
 
     #[test]
     fn bash_backend_leaves_msys_paths_unchanged() {
-        let out = rewrite_command_for_shell("cat > /d/Johnny/x.txt", "bash");
-        assert_eq!(out.as_ref(), "cat > /d/Johnny/x.txt");
+        let out = rewrite_command_for_shell("cat > /d/ClawCodex/x.txt", "bash");
+        assert_eq!(out.as_ref(), "cat > /d/ClawCodex/x.txt");
     }
 
     #[test]
     fn sh_backend_leaves_paths_unchanged() {
-        let out = rewrite_command_for_shell("cat > /d/Johnny/x.txt", "sh");
-        assert_eq!(out.as_ref(), "cat > /d/Johnny/x.txt");
+        let out = rewrite_command_for_shell("cat > /d/ClawCodex/x.txt", "sh");
+        assert_eq!(out.as_ref(), "cat > /d/ClawCodex/x.txt");
     }
 
     #[cfg(windows)]
     #[test]
     fn wsl_rewrites_msys_drive_paths() {
-        let out = rewrite_command_for_shell("cat > /d/Johnny/x.txt", "wsl");
-        assert_eq!(out.as_ref(), "cat > /mnt/d/Johnny/x.txt");
+        let out = rewrite_command_for_shell("cat > /d/ClawCodex/x.txt", "wsl");
+        assert_eq!(out.as_ref(), "cat > /mnt/d/ClawCodex/x.txt");
     }
 
     #[cfg(windows)]
     #[test]
     fn wsl_rewrites_leading_msys_path() {
-        let out = rewrite_command_for_shell("/d/Johnny/x.txt", "wsl");
-        assert_eq!(out.as_ref(), "/mnt/d/Johnny/x.txt");
+        let out = rewrite_command_for_shell("/d/ClawCodex/x.txt", "wsl");
+        assert_eq!(out.as_ref(), "/mnt/d/ClawCodex/x.txt");
     }
 
     #[cfg(windows)]
     #[test]
     fn wsl_rewrites_after_whitespace() {
-        let out = rewrite_command_for_shell("ls -la /d/Johnny", "wsl");
-        assert_eq!(out.as_ref(), "ls -la /mnt/d/Johnny");
+        let out = rewrite_command_for_shell("ls -la /d/ClawCodex", "wsl");
+        assert_eq!(out.as_ref(), "ls -la /mnt/d/ClawCodex");
     }
 
     #[cfg(windows)]

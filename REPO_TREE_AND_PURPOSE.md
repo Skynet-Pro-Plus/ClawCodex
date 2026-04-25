@@ -9,7 +9,7 @@ This file is a **map of the repository layout** and **what each major area is fo
 ## At-a-glance layout
 
 ```text
-Johnny/
+ClawCodex/
 ├── .github/              CI, releases, doc checks
 ├── .claude/              IDE/agent session JSON (tracked in this clone)
 ├── assets/               README / marketing images
@@ -430,7 +430,7 @@ USAGE.md
 
 ## Appendix B: notable paths on disk but not in git
 
-These appeared under `D:\Johnny\Johnny` alongside the clone but are **not** in `git ls-files`. They may be personal, Windows-specific, or generated.
+These appeared under `D:\ClawCodex\ClawCodex` alongside the clone but are **not** in `git ls-files`. They may be personal, Windows-specific, or generated.
 
 | Path | Typical role |
 |------|----------------|

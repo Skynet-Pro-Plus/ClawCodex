@@ -5,14 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Filesystem conventions (Claw / Windows)
 
 - **Prefer native file tools** for any file I/O: `write_file`, `read_file`, `edit_file`, `glob`, `grep_search`. They normalize paths correctly on Windows.
-- **Accepted path forms** on Windows: `D:\Johnny\...` (native), `/d/Johnny/...` (Git Bash / MSYS), or `/mnt/d/Johnny/...` (WSL-style). The runtime maps these to the same underlying files.
+- **Accepted path forms** on Windows: `D:\ClawCodex\...` (native), `/d/ClawCodex/...` (Git Bash / MSYS), or `/mnt/d/ClawCodex/...` (WSL-style). The runtime maps these to the same underlying files.
 - **Bash vs files**: Use `bash` for builds, git, and process orchestration — not as a substitute for `write_file` when creating or editing project files.
 - **WSL caveat**: If the host runs the bash tool through WSL, `/d/...` is *not* the same as the Windows `D:\` drive unless rewritten to `/mnt/d/...`. Claw rewrites MSYS-style `/x/...` segments automatically for the WSL backend; `D:\...` and `/mnt/d/...` remain the most explicit forms.
 
 ## Runtime environment
 
 - **OS**: Windows 11 (Git Bash / MSYS2 MINGW64 shell)
-- **Project root**: `D:\Johnny\Johnny` — in bash use `/d/Johnny/Johnny` (Git Bash) or `/mnt/d/Johnny/Johnny` (WSL)
+- **Project root**: `D:\ClawCodex\ClawCodex` — in bash use `/d/ClawCodex/ClawCodex` (Git Bash) or `/mnt/d/ClawCodex/ClawCodex` (WSL)
 - **Python**: use `python` (Python 3.13 at `C:\Python313`) — NOT `python3`; both `python` and `pip` are on PATH
 - **Package install**: `pip install <pkg>` works in bash
 - **PowerShell**: available for Windows-specific tasks; use `powershell -Command "..."` from bash
@@ -21,9 +21,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Shell notes
 - Prefer **native file tools** for creating/editing files; use bash for commands that need a shell.
-- In **Git Bash**, paths can use MSYS2 form: `/d/Johnny/Johnny/`. In **WSL**, use `/mnt/d/Johnny/Johnny/` for the same Windows tree.
-- Native Windows paths `D:\Johnny\Johnny\` work from PowerShell and from Claw's file tools.
-- Do NOT use `cd D:/Johnny` in Git Bash if that fails in your environment; use `cd /d/Johnny/Johnny` (or `/mnt/d/...` under WSL).
+- In **Git Bash**, paths can use MSYS2 form: `/d/ClawCodex/ClawCodex/`. In **WSL**, use `/mnt/d/ClawCodex/ClawCodex/` for the same Windows tree.
+- Native Windows paths `D:\ClawCodex\ClawCodex\` work from PowerShell and from Claw's file tools.
+- Do NOT use `cd D:/ClawCodex` in Git Bash if that fails in your environment; use `cd /d/ClawCodex/ClawCodex` (or `/mnt/d/...` under WSL).
 - Avoid escaping issues: write Python scripts to a `.py` file then run `python file.py` rather than `python -c "..."` with complex quoting
 
 ## Detected stack
