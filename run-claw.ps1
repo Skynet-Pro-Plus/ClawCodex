@@ -8,7 +8,7 @@
   e.g.  .\run-claw.ps1 prompt "hello"   or   .\run-claw.ps1 --help
 
   Set at least one provider credential before use, for example:
-    $env:ANTHROPIC_API_KEY = "INSERT API KEY HEAR"
+    $env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -27,10 +27,10 @@ $hasAuth =
 if (-not $hasAuth) {
     Write-Host "No API key / token detected in the environment." -ForegroundColor Yellow
     Write-Host "Set one before running, for example (Anthropic):" -ForegroundColor Yellow
-    Write-Host '  $env:ANTHROPIC_API_KEY = "INSERT API KEY HEAR"' -ForegroundColor Cyan
+    Write-Host '  $env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"' -ForegroundColor Cyan
     Write-Host "OpenRouter-style example:" -ForegroundColor Yellow
     Write-Host '  $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"' -ForegroundColor Cyan
-    Write-Host '  $env:OPENAI_API_KEY = "INSERT API KEY HEAR"' -ForegroundColor Cyan
+    Write-Host '  $env:OPENAI_API_KEY = "YOUR_API_KEY_HERE"' -ForegroundColor Cyan
     Write-Host ""
 }
 
