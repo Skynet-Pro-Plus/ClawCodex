@@ -31,14 +31,73 @@
 Claw Code is the public Rust implementation of the `claw` CLI agent harness.
 The canonical implementation lives in [`rust/`](./rust), and the current source of truth for this repository is **ultraworkers/claw-code**.
 
+This **ClawCodex** distribution ships a **prebuilt Windows** `claw` at [`bin/windows/claw.exe`](./bin/windows/claw.exe) plus [`run-claw.ps1`](./run-claw.ps1) / [`run-claw.bat`](./run-claw.bat) so you can start the CLI without compiling. Rebuild anytime with [`build-claw.ps1`](./build-claw.ps1) (requires [Rust](https://rustup.rs/) on `PATH`).
+
 > [!IMPORTANT]
 > Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows. Make `claw doctor` your first health check after building, use [`rust/README.md`](./rust/README.md) for crate-level details, read [`PARITY.md`](./PARITY.md) for the current Rust-port checkpoint, and see [`docs/container.md`](./docs/container.md) for the container-first workflow.
 >
 > **ACP / Zed status:** `claw-code` does not ship an ACP/Zed daemon entrypoint yet. Run `claw acp` (or `claw --acp`) for the current status instead of guessing from source layout; `claw acp serve` is currently a discoverability alias only, and real ACP support remains tracked separately in `ROADMAP.md`.
 
+## Run ClawCodex on Windows (easiest path)
+
+1. Open **PowerShell** in this folder (the repo root — the same directory as `run-claw.ps1`).
+2. Set your API key (replace the placeholder with your real key):
+
+   ```powershell
+   $env:ANTHROPIC_API_KEY = "INSERT API KEY HEAR"
+   ```
+
+   For **OpenRouter** instead:
+
+   ```powershell
+   $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+   $env:OPENAI_API_KEY = "INSERT API KEY HEAR"
+   ```
+
+3. Start the CLI (interactive REPL):
+
+   ```powershell
+   .\run-claw.ps1
+   ```
+
+   Or run a **one-shot** prompt:
+
+   ```powershell
+   .\run-claw.ps1 prompt "say hello"
+   ```
+
+   Or call the binary directly:
+
+   ```powershell
+   .\bin\windows\claw.exe --help
+   .\bin\windows\claw.exe doctor
+   ```
+
+4. **Rebuild** `bin\windows\claw.exe` from this source tree (needs `cargo`):
+
+   ```powershell
+   .\build-claw.ps1
+   ```
+
+### Troubleshooting (Windows)
+
+- **`run-claw.ps1 cannot be loaded because running scripts is disabled`:** run once in an elevated PowerShell, or for your user only:
+
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+  ```
+
+  Or use **`run-claw.bat`**, which bypasses script policy for that launch.
+
+- **`Missing: ...\bin\windows\claw.exe`:** run `.\build-claw.ps1` on a machine with Rust installed, or copy a fresh `claw.exe` from `rust\target\release\` after `cargo build --release -p rusty-claude-cli`.
+
+- **401 / missing credentials:** you must export a real key — replace `INSERT API KEY HEAR` with your provider key. See [`USAGE.md`](./USAGE.md) for provider-specific env vars.
+
 ## Current repository shape
 
 - **`rust/`** — canonical Rust workspace and the `claw` CLI binary
+- **`bin/windows/claw.exe`** — packaged Windows release build for this distribution
+- **`run-claw.ps1`**, **`run-claw.bat`**, **`build-claw.ps1`** — launch and rebuild helpers
 - **`USAGE.md`** — task-oriented usage guide for the current product surface
 - **`PARITY.md`** — Rust-port parity status and migration notes
 - **`ROADMAP.md`** — active roadmap and cleanup backlog
