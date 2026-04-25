@@ -18,6 +18,8 @@
 
 ClawCodex is a packaged distribution of the `claw` CLI agent harness with the Rust workspace in [`rust/`](./rust) and a bundled Windows binary in [`bin/windows/claw.exe`](./bin/windows/claw.exe).
 
+This repository is published for research and experimentation only. It is not an official release channel, not a supported production product, and not affiliated with Anthropic.
+
 This repo is set up so a new user can:
 
 1. Run the packaged Windows binary immediately.
@@ -37,9 +39,94 @@ This repo is set up so a new user can:
 
 ## Tool Call Surface
 
-This distribution exposes a broader tool surface than the basic shell-plus-file-editing baseline. The current built-in tool registry in [`rust/crates/tools/src/lib.rs`](./rust/crates/tools/src/lib.rs) includes:
+This distribution currently documents a 50-tool surface.
 
-Core workspace tools:
+For clarity:
+
+- `Baseline` means the core shell/file/search workflow most people expect from a coding agent.
+- `Added` means the broader capabilities layered on top in this distribution: planning, structured output, web research, notebook editing, worker/task orchestration, MCP integration, cron/team tools, and runtime helpers.
+
+The current tool surfaces come from [`rust/crates/tools/src/lib.rs`](./rust/crates/tools/src/lib.rs) plus the additional runtime/integration tools exercised by [`rust/crates/tools/src/bin/tool_audit.rs`](./rust/crates/tools/src/bin/tool_audit.rs).
+
+### Baseline workspace tools
+
+These are the closest match to the original/basic shell-plus-file-editing tool surface.
+
+- `bash` - run shell commands in the workspace
+- `read_file` - read file contents
+- `write_file` - write file contents
+- `edit_file` - replace text inside files
+- `glob_search` - find files by glob pattern
+- `grep_search` - search file contents by pattern
+
+### Added shell and editing tools
+
+- `PowerShell` - run Windows-native PowerShell commands
+- `REPL` - execute code in a supported language REPL/runtime
+- `NotebookEdit` - modify notebook cell contents
+
+### Added web and discovery tools
+
+- `WebFetch` - fetch a URL and answer a prompt about it
+- `WebSearch` - search the web for current information
+- `ToolSearch` - search the available tool registry
+
+### Added planning and workflow tools
+
+- `TodoWrite` - maintain a structured todo/task list
+- `Skill` - invoke installed skills
+- `Config` - inspect config state
+- `Sleep` - pause for a short period during workflows
+- `SendUserMessage` - send an explicit user-facing progress/update message
+- `StructuredOutput` - emit structured/machine-readable output
+- `EnterPlanMode` - switch into plan mode
+- `ExitPlanMode` - leave plan mode
+- `AskUserQuestion` - ask an explicit user question through the runtime
+
+### Added task and agent orchestration tools
+
+- `Agent` - create or invoke an agent workflow
+- `TaskCreate` - create a tracked task
+- `RunTaskPacket` - create a task from a structured task packet
+- `TaskGet` - inspect one task
+- `TaskList` - list tracked tasks
+- `TaskStop` - stop a task
+- `TaskUpdate` - update task status or metadata
+- `TaskOutput` - retrieve task output
+
+### Added worker lifecycle tools
+
+- `WorkerCreate` - create a worker/session process
+- `WorkerGet` - inspect worker state
+- `WorkerObserve` - attach observation data to worker state
+- `WorkerResolveTrust` - resolve workspace trust status for a worker
+- `WorkerAwaitReady` - wait for a worker to become ready
+- `WorkerSendPrompt` - send a prompt to a worker
+- `WorkerRestart` - restart a worker
+- `WorkerObserveCompletion` - record worker completion state
+- `WorkerTerminate` - terminate a worker
+
+### Added team and scheduling tools
+
+- `TeamCreate` - create a team grouping for coordinated work
+- `TeamDelete` - remove a team grouping
+- `CronCreate` - create a cron/scheduled job
+- `CronList` - list scheduled jobs
+- `CronDelete` - delete a scheduled job
+
+### Added integration and protocol tools
+
+- `LSP` - interact with language-server-backed features
+- `ListMcpResources` - list resources exposed by an MCP server
+- `ReadMcpResource` - read a specific MCP resource
+- `McpAuth` - inspect or handle MCP auth state
+- `MCP` - invoke MCP-exposed tools
+- `RemoteTrigger` - trigger a remote/integration action
+- `TestingPermission` - exercise/testing hook for permission flows
+
+### Which tools were added
+
+If you compare this repo to the basic shell/file/search baseline, the baseline set is:
 
 - `bash`
 - `read_file`
@@ -47,18 +134,17 @@ Core workspace tools:
 - `edit_file`
 - `glob_search`
 - `grep_search`
+
+Everything else listed above is part of the expanded tool surface added in this distribution.
+
+That means the added tools are:
+
 - `PowerShell`
 - `REPL`
 - `NotebookEdit`
-
-Web and research tools:
-
 - `WebFetch`
 - `WebSearch`
 - `ToolSearch`
-
-Planning and session workflow tools:
-
 - `TodoWrite`
 - `Skill`
 - `Config`
@@ -68,9 +154,6 @@ Planning and session workflow tools:
 - `EnterPlanMode`
 - `ExitPlanMode`
 - `AskUserQuestion`
-
-Agent and worker orchestration tools:
-
 - `Agent`
 - `TaskCreate`
 - `RunTaskPacket`
@@ -84,9 +167,6 @@ Agent and worker orchestration tools:
 - `WorkerObserve`
 - `WorkerResolveTrust`
 - `WorkerAwaitReady`
-
-Additional runtime and integration surfaces exercised by the tool audit harness in [`rust/crates/tools/src/bin/tool_audit.rs`](./rust/crates/tools/src/bin/tool_audit.rs):
-
 - `WorkerSendPrompt`
 - `WorkerRestart`
 - `WorkerObserveCompletion`
@@ -104,7 +184,7 @@ Additional runtime and integration surfaces exercised by the tool audit harness 
 - `RemoteTrigger`
 - `TestingPermission`
 
-Not every tool is available in every environment. Some require configured MCP servers, worker state, cron/team state, local runtimes, or provider/network access. The important point for new users is that this repo is not just a thin wrapper around shell commands: it includes web fetch/search, notebook editing, structured task tracking, agent/task orchestration, worker lifecycle tools, and MCP-facing integration hooks.
+Not every tool is available in every environment. Some depend on configured MCP servers, worker state, cron/team state, local runtimes, or provider/network access. The main takeaway for users is that this repo is not only a shell/file editor: it also includes planning, web research, notebook editing, structured output, task and worker orchestration, and MCP-facing integration hooks.
 
 ## Quick Start
 
@@ -224,5 +304,6 @@ This distribution is based on the broader Claw Code ecosystem and still referenc
 
 ## Disclaimer
 
+- This repository is for research and experimentation only.
 - This repository does not claim ownership of the original Claude Code source material.
 - This repository is not affiliated with, endorsed by, or maintained by Anthropic.
