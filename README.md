@@ -26,6 +26,21 @@ This repo is set up so a new user can:
 2. Rebuild the binary from source when needed.
 3. Use `claw doctor` as the first health check before deeper troubleshooting.
 
+## Recent updates
+
+- **OpenRouter-first documentation and health checks** — Quick start and [`USAGE.md`](./USAGE.md) focus on OpenRouter (`OPENAI_BASE_URL` + `OPENAI_API_KEY`). `claw doctor` reports OpenRouter readiness using env vars or a repo-root `.env`. The API crate exposes `read_openai_base_url_explicit()` so diagnostics only treat an **explicit** `OPENAI_BASE_URL` as configured (see `rust/crates/api/src/providers/openai_compat.rs`).
+- **Windows launch reliability** — [`run-claw.ps1`](./run-claw.ps1) changes the process working directory to the repo root before invoking `claw.exe`, so a `.env` next to `README.md` is found even when you start the script from another folder. [`run-claw.bat`](./run-claw.bat) runs `cd /d "%~dp0"` first for the same reason.
+- **Command Prompt vs PowerShell** — Use one shell consistently; syntax is not interchangeable.
+
+| Shell | Set OpenRouter env vars | Launch |
+| ----- | ------------------------ | ------ |
+| **Command Prompt** (`cmd.exe`) | `set OPENAI_BASE_URL=https://openrouter.ai/api/v1` then `set OPENAI_API_KEY=your_key` | From repo root: `run-claw.bat` (and pass args after it, e.g. `run-claw.bat doctor`). Use `cd /d D:\clawcodex` if you are on another drive. |
+| **PowerShell** | `$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"` then `$env:OPENAI_API_KEY = "your_key"` | From repo root: `.\run-claw.ps1` |
+
+More examples: [`USAGE.md`](./USAGE.md).
+
+- **Bundled binary** — This repo may ship a prebuilt [`bin/windows/claw.exe`](./bin/windows/claw.exe). To match **current** Rust sources on your machine, run [`build-claw.ps1`](./build-claw.ps1) locally; source changes can be committed without re-committing that large binary every time.
+
 ## What is in this repo
 
 - `rust/` - canonical Rust workspace and the `claw` CLI source
@@ -190,10 +205,11 @@ Not every tool is available in every environment. Some depend on configured MCP 
 
 ### Windows: run the bundled binary
 
-Open PowerShell in the repo root and set a provider credential:
+Open PowerShell in the repo root and set **OpenRouter**:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
+$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 ```
 
 Then launch ClawCodex:
@@ -227,32 +243,19 @@ If you want to refresh the packaged Windows binary in `bin/windows/`:
 
 ## Authentication
 
-Anthropic direct API:
-
-```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
-```
-
-OpenRouter:
+This distribution documents **OpenRouter** as the supported path:
 
 ```powershell
 $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
-$env:OPENAI_API_KEY = "YOUR_API_KEY_HERE"
+$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 ```
 
-Ollama:
-
-```powershell
-$env:OPENAI_BASE_URL = "http://127.0.0.1:11434/v1"
-Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
-```
-
-See [`USAGE.md`](./USAGE.md) for OpenAI-compatible, xAI, DashScope, proxy, and session-resume flows.
+Use an OpenRouter model id (for example `openai/gpt-4.1-mini` or another id from the OpenRouter catalog). Session resume and tooling flows are covered in [`USAGE.md`](./USAGE.md).
 
 ## First-Run Checklist
 
 1. Install Rust from [rustup.rs](https://rustup.rs/) if you need to build locally.
-2. Set one provider credential in your shell.
+2. Set OpenRouter (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) in your shell or `.env`.
 3. Run `claw doctor`.
 4. Run a small prompt like `claw prompt "say hello"`.
 5. If you are on Windows and using the packaged build, prefer `run-claw.ps1` or `run-claw.bat`.
@@ -271,7 +274,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 .\build-claw.ps1
 ```
 
-- If you get a 401, double-check that you placed the credential in the correct env var. `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not interchangeable.
+- If you get a 401, confirm `OPENAI_API_KEY` is your OpenRouter key and `OPENAI_BASE_URL` is `https://openrouter.ai/api/v1` (or copy [`.env.example`](./.env.example) to `.env` in the repo root).
 
 - If a prompt fails and you are not sure why, run:
 

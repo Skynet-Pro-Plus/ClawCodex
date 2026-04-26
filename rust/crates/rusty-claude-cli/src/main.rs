@@ -26,12 +26,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    detect_provider_kind, has_api_key, max_tokens_for_model, read_openai_compat_base_url,
-    resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta,
-    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
-    OpenAiCompatConfig,
+    detect_provider_kind, has_api_key, max_tokens_for_model, read_openai_api_key,
+    read_openai_base_url_explicit, read_openai_compat_base_url, resolve_startup_auth_source,
+    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock, OpenAiCompatConfig,
 };
 
 use commands::{
@@ -864,7 +864,7 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
 
 fn removed_auth_surface_error(command_name: &str) -> String {
     format!(
-        "`claw {command_name}` has been removed. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+        "`claw {command_name}` has been removed. Configure OpenRouter: set OPENAI_BASE_URL to https://openrouter.ai/api/v1 and OPENAI_API_KEY to your OpenRouter key (or place both in a .env beside claw.exe or the working directory)."
     )
 }
 
@@ -1676,32 +1676,38 @@ fn run_mcp_serve() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let api_key_present = env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let auth_token_present = env::var("ANTHROPIC_AUTH_TOKEN")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let openai_api_key_present = read_openai_api_key().is_some();
+    let openrouter_base_ok = read_openai_base_url_explicit()
+        .as_deref()
+        .is_some_and(|value| value.to_lowercase().contains("openrouter"));
+    let openrouter_ready = openai_api_key_present && openrouter_base_ok;
+    let base_url_label = if read_openai_base_url_explicit().is_none() {
+        "absent"
+    } else if openrouter_base_ok {
+        "openrouter"
+    } else {
+        "set (expected URL containing \"openrouter\")"
+    };
     let env_details = format!(
-        "Environment       api_key={} auth_token={}",
-        if api_key_present { "present" } else { "absent" },
-        if auth_token_present {
+        "OpenRouter          OPENAI_API_KEY={} OPENAI_BASE_URL={}",
+        if openai_api_key_present {
             "present"
         } else {
             "absent"
-        }
+        },
+        base_url_label
     );
 
     match load_oauth_credentials() {
         Ok(Some(token_set)) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || auth_token_present {
+            if openrouter_ready {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || auth_token_present {
-                "supported auth env vars are configured; legacy saved OAuth is ignored"
+            if openrouter_ready {
+                "OpenRouter credentials are configured; legacy saved OAuth is ignored"
             } else {
                 "legacy saved OAuth credentials are present but unsupported"
             },
@@ -1724,12 +1730,19 @@ fn check_auth_health() -> DiagnosticCheck {
                     token_set.scopes.join(",")
                 }
             ),
-            "Suggested action  set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN; `claw login` is removed"
+            "Suggested action  set OPENAI_BASE_URL=https://openrouter.ai/api/v1 and OPENAI_API_KEY; `claw login` is removed"
                 .to_string(),
         ])
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), json!(true)),
             (
                 "legacy_saved_oauth_expires_at".to_string(),
@@ -1743,21 +1756,28 @@ fn check_auth_health() -> DiagnosticCheck {
         ])),
         Ok(None) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || auth_token_present {
+            if openrouter_ready {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || auth_token_present {
-                "supported auth env vars are configured"
+            if openrouter_ready {
+                "OpenRouter credentials are configured"
             } else {
-                "no supported auth env vars were found"
+                "OpenRouter credentials were not found (set OPENAI_BASE_URL to the OpenRouter API and OPENAI_API_KEY)"
             },
         )
         .with_details(vec![env_details])
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), json!(false)),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
             ("legacy_refresh_token_present".to_string(), json!(false)),
@@ -1769,8 +1789,15 @@ fn check_auth_health() -> DiagnosticCheck {
             format!("failed to inspect legacy saved credentials: {error}"),
         )
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), Value::Null),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
             ("legacy_refresh_token_present".to_string(), Value::Null),
@@ -9355,9 +9382,11 @@ mod tests {
     #[test]
     fn removed_login_and_logout_subcommands_error_helpfully() {
         let login = parse_args(&["login".to_string()]).expect_err("login should be removed");
-        assert!(login.contains("ANTHROPIC_API_KEY"));
+        assert!(login.contains("OPENAI_API_KEY"));
+        assert!(login.to_lowercase().contains("openrouter"));
         let logout = parse_args(&["logout".to_string()]).expect_err("logout should be removed");
-        assert!(logout.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(logout.contains("OPENAI_API_KEY"));
+        assert!(logout.to_lowercase().contains("openrouter"));
         assert_eq!(
             parse_args(&["doctor".to_string()]).expect("doctor should parse"),
             CliAction::Doctor {

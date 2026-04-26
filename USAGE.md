@@ -2,14 +2,15 @@
 
 This guide is for people trying to get the engine running quickly from this repository.
 
-If you are brand new, make `doctor` your first command after setting credentials.
+If you are brand new, make `doctor` your first command after setting OpenRouter credentials.
 
 ## Fastest Path on Windows
 
 From the repo root in PowerShell:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
+$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 .\run-claw.ps1 doctor
 .\run-claw.ps1
 ```
@@ -44,49 +45,23 @@ cargo build --workspace
 ./target/debug/claw prompt "say hello"
 ```
 
-## Credentials
-
-### Anthropic API key
+## Credentials (OpenRouter)
 
 PowerShell:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
+$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 ```
 
 Bash:
 
 ```bash
-export ANTHROPIC_API_KEY="YOUR_API_KEY_HERE"
-```
-
-### Anthropic bearer token
-
-Use this only for an OAuth/proxy bearer token, not for an `sk-ant-*` API key.
-
-```bash
-export ANTHROPIC_AUTH_TOKEN="anthropic-oauth-or-proxy-bearer-token"
-```
-
-### OpenRouter
-
-```bash
 export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-export OPENAI_API_KEY="YOUR_API_KEY_HERE"
+export OPENAI_API_KEY="YOUR_OPENROUTER_KEY_HERE"
 ```
 
-### Ollama
-
-```bash
-export OPENAI_BASE_URL="http://127.0.0.1:11434/v1"
-unset OPENAI_API_KEY
-```
-
-### DashScope / Qwen
-
-```bash
-export DASHSCOPE_API_KEY="YOUR_API_KEY_HERE"
-```
+Pick a model from the OpenRouter catalog and pass `--model <id>` when needed (for example `openai/gpt-4.1-mini`).
 
 ## Common Commands
 
@@ -167,21 +142,14 @@ Built-in model aliases:
 - `sonnet` -> `claude-sonnet-4-6`
 - `haiku` -> `claude-haiku-4-5-20251213`
 
-## How Provider Detection Works
+## How routing works with OpenRouter
 
-1. If the model starts with `claude`, Claw uses the Anthropic provider.
-2. If the model starts with `grok`, Claw uses xAI.
-3. If the model starts with `openai/`, `gpt-`, `qwen/`, or `qwen-`, Claw uses the OpenAI-compatible path.
-4. Otherwise Claw falls back to whichever matching credential is present.
+Traffic goes to the host in `OPENAI_BASE_URL` (OpenRouter’s OpenAI-compatible API). Choose a model id OpenRouter exposes; namespaced ids such as `openai/...` map cleanly to the OpenAI-compatible wire path. If a request fails with auth errors, confirm both `OPENAI_BASE_URL` and `OPENAI_API_KEY` are set and that the model id exists on OpenRouter.
 
 ## 401 Fixes
 
-The most common auth mistake is putting an `sk-ant-*` API key into `ANTHROPIC_AUTH_TOKEN`.
-
-Use:
-
-- `ANTHROPIC_API_KEY` for Anthropic API keys
-- `ANTHROPIC_AUTH_TOKEN` for bearer tokens from a proxy or OAuth flow
+- Use an OpenRouter key in `OPENAI_API_KEY` (`sk-or-v1-...`), not a key from another vendor.
+- Keep `OPENAI_BASE_URL` on `https://openrouter.ai/api/v1` unless OpenRouter documents a different base URL for your account type.
 
 ## Portable `.env`
 

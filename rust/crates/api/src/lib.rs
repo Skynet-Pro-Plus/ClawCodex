@@ -22,7 +22,8 @@ pub use providers::anthropic::{AnthropicClient, AnthropicClient as ApiClient, Au
 pub use providers::openai_compat::{
     build_chat_completion_request, flatten_tool_result_content, has_api_key, is_reasoning_model,
     model_rejects_is_error_field, read_base_url as read_openai_compat_base_url,
-    read_openai_api_key, translate_message, OpenAiCompatClient, OpenAiCompatConfig,
+    read_openai_api_key, read_openai_base_url_explicit, translate_message, OpenAiCompatClient,
+    OpenAiCompatConfig,
 };
 pub use providers::{
     detect_provider_kind, max_tokens_for_model, max_tokens_for_model_with_override,
