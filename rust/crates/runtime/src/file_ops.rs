@@ -842,9 +842,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn repairs_mangled_verbatim_windows_path() {
-        let mapped =
-            super::repair_windows_double_drive_segment(r"\\?\D:\d\ClawCodex\ClawCodex\hello_worlds.html")
-                .expect("verbatim mangled path should repair");
+        let mapped = super::repair_windows_double_drive_segment(
+            r"\\?\D:\d\ClawCodex\ClawCodex\hello_worlds.html",
+        )
+        .expect("verbatim mangled path should repair");
         let s = mapped.to_string_lossy();
         assert!(
             s.ends_with(r"D:\ClawCodex\ClawCodex\hello_worlds.html")
@@ -856,8 +857,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn repairs_mangled_non_verbatim_windows_path() {
-        let mapped = super::repair_windows_double_drive_segment(r"D:\d\ClawCodex\ClawCodex\file.html")
-            .expect("non-verbatim mangled path should repair");
+        let mapped =
+            super::repair_windows_double_drive_segment(r"D:\d\ClawCodex\ClawCodex\file.html")
+                .expect("non-verbatim mangled path should repair");
         let normalized = mapped.to_string_lossy().replace('\\', "/");
         assert_eq!(normalized, "D:/ClawCodex/ClawCodex/file.html");
     }

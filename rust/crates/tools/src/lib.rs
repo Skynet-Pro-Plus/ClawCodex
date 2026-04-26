@@ -3178,9 +3178,10 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
 
     let mut status_changes = Vec::new();
     for new in &input.todos {
-        if let Some(old) = old_todos.iter().find(|o| {
-            o.content == new.content && o.active_form == new.active_form
-        }) {
+        if let Some(old) = old_todos
+            .iter()
+            .find(|o| o.content == new.content && o.active_form == new.active_form)
+        {
             if old.status != new.status {
                 status_changes.push(TodoStatusChange {
                     content: new.content.clone(),

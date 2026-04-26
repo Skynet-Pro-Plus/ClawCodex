@@ -7,8 +7,10 @@
   Uses bin\windows\claw.exe. Pass any normal claw arguments after the script name,
   e.g.  .\run-claw.ps1 prompt "hello"   or   .\run-claw.ps1 --help
 
-  Credentials: put OpenRouter settings in a repo-root `.env` (copy from .env.example).
-  Optional: set OPENAI_BASE_URL and OPENAI_API_KEY in the shell instead (CI/advanced).
+  Prefer run-claw.bat if you want Command Prompt without invoking PowerShell.
+
+  Credentials: put OpenRouter settings in a repo-root `.env` (copy from .env.example),
+  or let claw prompt once on first run (see USAGE.md). Optional: set env vars for CI.
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

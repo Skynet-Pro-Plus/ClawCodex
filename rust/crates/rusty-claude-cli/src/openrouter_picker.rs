@@ -10,6 +10,7 @@ use serde_json::Value;
 pub const OPENROUTER_DEFAULT_MODEL_ID: &str = "openai/gpt-4.1-mini";
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+const MIN_CLAW_CONTEXT_TOKENS: u32 = 128_000;
 
 #[derive(Debug, Clone)]
 pub struct OpenRouterModelRow {
@@ -18,6 +19,8 @@ pub struct OpenRouterModelRow {
     pub name: String,
     pub context_length: Option<u32>,
     pub modality: Option<String>,
+    pub prompt_price_per_million: Option<String>,
+    pub completion_price_per_million: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,12 +103,7 @@ fn openrouter_model_passes_claw_filters(raw: &Value) -> bool {
     let supported: Vec<&str> = raw
         .get("supported_parameters")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-        })
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
     if supported.is_empty()
         || !supported.iter().any(|p| *p == "max_tokens")
@@ -128,9 +126,37 @@ fn openrouter_model_passes_claw_filters(raw: &Value) -> bool {
         .and_then(Value::as_str)
         .unwrap_or("");
     if modality.is_empty() {
-        return true;
+        return model_has_claw_sized_context(raw);
     }
-    modality.contains("->text")
+    modality.contains("->text") && model_has_claw_sized_context(raw)
+}
+
+fn model_has_claw_sized_context(raw: &Value) -> bool {
+    raw.get("context_length")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .is_some_and(|n| n >= MIN_CLAW_CONTEXT_TOKENS)
+}
+
+fn format_price_per_million(raw: Option<&Value>) -> Option<String> {
+    let price = raw.and_then(|v| match v {
+        Value::String(s) => s.parse::<f64>().ok(),
+        Value::Number(n) => n.as_f64(),
+        _ => None,
+    })?;
+    if !price.is_finite() || price < 0.0 {
+        return None;
+    }
+    let per_million = price * 1_000_000.0;
+    if per_million <= f64::EPSILON {
+        Some("$0/M".to_string())
+    } else if per_million < 0.01 {
+        Some(format!("${per_million:.4}/M"))
+    } else if per_million < 1.0 {
+        Some(format!("${per_million:.3}/M"))
+    } else {
+        Some(format!("${per_million:.2}/M"))
+    }
 }
 
 fn parse_model_row(raw: &Value) -> Option<OpenRouterModelRow> {
@@ -156,6 +182,8 @@ fn parse_model_row(raw: &Value) -> Option<OpenRouterModelRow> {
         .pointer("/architecture/modality")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let prompt_price_per_million = format_price_per_million(raw.pointer("/pricing/prompt"));
+    let completion_price_per_million = format_price_per_million(raw.pointer("/pricing/completion"));
 
     Some(OpenRouterModelRow {
         id,
@@ -163,6 +191,8 @@ fn parse_model_row(raw: &Value) -> Option<OpenRouterModelRow> {
         name,
         context_length,
         modality,
+        prompt_price_per_million,
+        completion_price_per_million,
     })
 }
 
@@ -174,10 +204,7 @@ fn fetch_openrouter_models(api_key: &str) -> Result<Vec<OpenRouterModelRow>, Str
 
     let response = client
         .get(OPENROUTER_MODELS_URL)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {api_key}"),
-        )
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
         .send()
         .map_err(|e| format!("OpenRouter models request failed: {e}"))?;
 
@@ -222,7 +249,10 @@ pub fn run_openrouter_model_picker() -> Result<(String, Option<u32>), String> {
     }
 
     eprintln!();
-    eprintln!("OpenRouter models (chat + streaming + tool use for Claw) - alphabetical by provider.");
+    eprintln!(
+        "OpenRouter models (tool use + text output + >= {MIN_CLAW_CONTEXT_TOKENS} context) - alphabetical by provider."
+    );
+    eprintln!("Prices are input/output per 1M tokens when OpenRouter reports pricing.");
     eprintln!("Press Enter for the default, type a number to choose, or paste an exact model id.");
     eprintln!();
 
@@ -245,8 +275,17 @@ pub fn run_openrouter_model_picker() -> Result<(String, Option<u32>), String> {
             .as_deref()
             .map(|m| format!(" | {m}"))
             .unwrap_or_default();
+        let pricing = match (
+            model.prompt_price_per_million.as_deref(),
+            model.completion_price_per_million.as_deref(),
+        ) {
+            (Some(prompt), Some(completion)) => format!(" | in {prompt} out {completion}"),
+            (Some(prompt), None) => format!(" | in {prompt} out ?"),
+            (None, Some(completion)) => format!(" | in ? out {completion}"),
+            (None, None) => String::new(),
+        };
         eprintln!(
-            "  [{display_index}] {} ({}{ctx}{modality})",
+            "  [{display_index}] {} ({}{ctx}{pricing}{modality})",
             model.id, model.name
         );
         display_index += 1;
@@ -285,5 +324,70 @@ pub fn run_openrouter_model_picker() -> Result<(String, Option<u32>), String> {
         }
 
         eprintln!("Model '{selection}' was not in the fetched OpenRouter list.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{format_price_per_million, openrouter_model_passes_claw_filters, parse_model_row};
+
+    fn compatible_model() -> serde_json::Value {
+        json!({
+            "id": "openai/gpt-4.1-mini",
+            "name": "GPT 4.1 Mini",
+            "context_length": 1_000_000,
+            "supported_parameters": ["tools", "max_tokens", "temperature"],
+            "architecture": {
+                "modality": "text->text",
+                "output_modalities": ["text"]
+            },
+            "pricing": {
+                "prompt": "0.00000015",
+                "completion": "0.00000060"
+            }
+        })
+    }
+
+    #[test]
+    fn filters_for_tool_text_and_large_context_models() {
+        assert!(openrouter_model_passes_claw_filters(&compatible_model()));
+
+        let mut no_tools = compatible_model();
+        no_tools["supported_parameters"] = json!(["max_tokens"]);
+        assert!(!openrouter_model_passes_claw_filters(&no_tools));
+
+        let mut small_context = compatible_model();
+        small_context["context_length"] = json!(32_000);
+        assert!(!openrouter_model_passes_claw_filters(&small_context));
+
+        let mut image_only = compatible_model();
+        image_only["architecture"]["output_modalities"] = json!(["image"]);
+        assert!(!openrouter_model_passes_claw_filters(&image_only));
+    }
+
+    #[test]
+    fn parses_context_and_token_pricing_for_display() {
+        let row = parse_model_row(&compatible_model()).expect("compatible row");
+        assert_eq!(row.context_length, Some(1_000_000));
+        assert_eq!(row.prompt_price_per_million.as_deref(), Some("$0.150/M"));
+        assert_eq!(
+            row.completion_price_per_million.as_deref(),
+            Some("$0.600/M")
+        );
+    }
+
+    #[test]
+    fn formats_openrouter_per_token_price_as_per_million() {
+        assert_eq!(
+            format_price_per_million(Some(&json!("0.000002"))).as_deref(),
+            Some("$2.00/M")
+        );
+        assert_eq!(
+            format_price_per_million(Some(&json!(0))).as_deref(),
+            Some("$0/M")
+        );
+        assert!(format_price_per_million(Some(&json!("not-a-number"))).is_none());
     }
 }

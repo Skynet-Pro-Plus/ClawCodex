@@ -2,32 +2,31 @@
 
 This guide is for people trying to get the engine running quickly from this repository.
 
-**Credentials live in one place:** a file named `.env` in the **repo root** (same folder as `README.md`). Copy [`.env.example`](./.env.example) to `.env`, edit `OPENAI_API_KEY` once, and use [`run-claw.ps1`](./run-claw.ps1) / [`run-claw.bat`](./run-claw.bat) so the working directory is that folder—`claw` then loads `.env` automatically. The file `.env` is gitignored so your key is not committed.
+## TL;DR (Windows)
 
-If you are brand new, run `doctor` after creating `.env`.
+1. Double-click [`START-CLAW.bat`](./START-CLAW.bat).
+2. If asked, paste your OpenRouter key once in that same Command Prompt window.
+3. Claw saves it to local `.env` and starts; later runs start directly.
 
-## Fastest Path on Windows
+**Credentials live in one place:** a file named `.env` in the **repo root** (same folder as `README.md`). The file is gitignored.
 
-From the repo root in PowerShell:
+## Fastest Path on Windows (one click)
 
-```powershell
-Copy-Item .\.env.example .\.env
-notepad .\.env
-```
+1. Double-click **[`START-CLAW.bat`](./START-CLAW.bat)** in File Explorer (or use [`open-cmd-here.bat`](./open-cmd-here.bat) — same flow).
+2. A Command Prompt opens, runs **`claw doctor`**, and if OpenRouter is not set up yet the CLI prints a **clear banner and `OpenRouter API key:` line in the same window** (no pop-up; typing is visible), saves **`.env`** next to `README.md`, and continues.
+3. In that same window, run the engine anytime:
+   - `run-claw.bat` — interactive REPL  
+   - `run-claw.bat prompt "summarize this repository"`
 
-Set `OPENAI_API_KEY` (and keep `OPENAI_BASE_URL` as in the template), save, then:
+If the OpenRouter model picker appears, the list is pre-filtered to Claw-compatible models (tool-calling + text output + large context), and each entry shows input/output token pricing per 1M tokens when OpenRouter provides pricing data.
 
-```powershell
-.\run-claw.ps1 doctor
-.\run-claw.ps1 prompt "summarize this repository"
-```
+If **`doctor` never asks for a key**, your `bin\windows\claw.exe` may be older than the source: from PowerShell run **`.\build-claw.ps1`**, then double-click **`START-CLAW.bat`** again.
 
-If PowerShell script execution is blocked, `run-claw.bat` does the same thing:
+**Manual `.env` instead:** copy [`.env.example`](./.env.example) to `.env`, edit `OPENAI_API_KEY` once, then `run-claw.bat doctor`.
 
-```powershell
-.\run-claw.bat doctor
-.\run-claw.bat prompt "summarize this repository"
-```
+**Interactive behavior details:** the save-once prompt runs for text `doctor` / REPL / text `prompt`. Set `CLAW_NO_CREDENTIAL_PROMPT=1` to disable (CI/scripts). JSON `doctor` skips the prompt.
+
+**PowerShell:** `.\run-claw.ps1 doctor` / `.\run-claw.ps1` from the repo root — same binary, same `.env` rules.
 
 ## Build From Source
 

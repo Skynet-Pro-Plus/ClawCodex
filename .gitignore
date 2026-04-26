@@ -19,3 +19,5 @@ rust/target/
 
 # Packaged Windows CLI for this distribution (tracked on purpose)
 # bin/windows/claw.exe is committed so users can run without compiling.
+bin/windows/claw.exe.new
+bin/windows/claw.exe.bak

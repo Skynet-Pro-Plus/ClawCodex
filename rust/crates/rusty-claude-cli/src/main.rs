@@ -8,6 +8,7 @@
 )]
 mod init;
 mod input;
+mod openrouter_first_run;
 mod openrouter_picker;
 mod render;
 
@@ -29,9 +30,9 @@ use api::{
     detect_provider_kind, has_api_key, max_tokens_for_model, read_openai_api_key,
     read_openai_base_url_explicit, read_openai_compat_base_url, resolve_startup_auth_source,
     AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    MessageRequest, MessageResponse, OpenAiCompatConfig, OutputContentBlock, PromptCache,
     ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock, OpenAiCompatConfig,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -43,6 +44,9 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
+use openrouter_first_run::{
+    ensure_openrouter_credentials_for_doctor, ensure_openrouter_credentials_if_needed,
+};
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
@@ -247,7 +251,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
-            let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode, None)?;
+            let mut cli = LiveCli::new(
+                model,
+                true,
+                allowed_tools,
+                permission_mode,
+                None,
+                output_format == CliOutputFormat::Text,
+            )?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
@@ -299,7 +310,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 allow_broad_cwd,
                 model_context_window,
             )?;
-        },
+        }
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
     }
@@ -1594,6 +1605,7 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
 }
 
 fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_openrouter_credentials_for_doctor(output_format == CliOutputFormat::Text)?;
     let report = render_doctor_report()?;
     let message = report.render();
     match output_format {
@@ -3177,12 +3189,9 @@ fn run_stale_base_preflight(flag_value: Option<&str>) {
 
 #[allow(clippy::needless_pass_by_value)]
 fn model_context_window_from_env() -> Option<u32> {
-    std::env::var("CLAW_MODEL_CONTEXT_WINDOW").ok().and_then(|raw| {
-        raw.trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|&n| n > 0)
-    })
+    std::env::var("CLAW_MODEL_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok().filter(|&n| n > 0))
 }
 
 fn run_repl(
@@ -3203,6 +3212,7 @@ fn run_repl(
         allowed_tools,
         permission_mode,
         model_context_window,
+        true,
     )?;
     cli.set_reasoning_effort(reasoning_effort);
     let mut editor =
@@ -3774,7 +3784,9 @@ impl LiveCli {
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         model_context_window: Option<u32>,
+        allow_credential_prompt: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        ensure_openrouter_credentials_if_needed(&model, allow_credential_prompt)?;
         let model_context_window = model_context_window.or_else(model_context_window_from_env);
         let system_prompt = build_system_prompt()?;
         let session_state = new_cli_session()?;
@@ -8870,10 +8882,7 @@ mod tests {
         let _guard = env_lock();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
         std::env::remove_var("CLAW_MODEL_CONTEXT_WINDOW");
-        let args = vec![
-            "--model".to_string(),
-            "openai/gpt-4.1-mini".to_string(),
-        ];
+        let args = vec!["--model".to_string(), "openai/gpt-4.1-mini".to_string()];
         match parse_args(&args).expect("args should parse") {
             CliAction::Repl {
                 model,
@@ -10290,6 +10299,7 @@ mod tests {
                 None,
                 PermissionMode::DangerFullAccess,
                 None,
+                false,
             )
             .expect("cli should initialize")
             .startup_banner()
