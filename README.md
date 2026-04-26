@@ -301,6 +301,10 @@ cargo test --workspace
 - [`ROADMAP.md`](./ROADMAP.md) - planned work
 - [`PHILOSOPHY.md`](./PHILOSOPHY.md) - project intent and design framing
 
+## Credits
+
+**Johnny Export** — This repository explicitly credits Johnny Export for his work and philosophy: treating autonomous agent coordination (not only the files on disk) as the product lesson, and centering the idea that **humans set direction while claws perform the labor**. See [`PHILOSOPHY.md`](./PHILOSOPHY.md) for the full framing and acknowledgment.
+
 ## Upstream Context
 
 This distribution is based on the broader Claw Code ecosystem and still references upstream command/status text in a few places. When command help mentions `ultraworkers/claw-code`, treat that as upstream source-of-truth context, not as a different binary name.

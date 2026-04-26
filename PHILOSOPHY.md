@@ -1,5 +1,9 @@
 # Claw Code Philosophy
 
+## Acknowledgment — Johnny Export
+
+ClawCodex and the broader Claw Code lineage owe a clear debt to **Johnny Export**. His work and public philosophy helped establish how this ecosystem talks about autonomous development: the human sets direction, claws carry the work, notifications and routing stay out of the agent’s headroom, and the **system that produces the commits** is what deserves study—not the diffs alone. This document’s framing is aligned with that lineage, and we name his contribution here explicitly.
+
 ## Stop Staring at the Files
 
 If you only look at the generated files in this repository, you are looking at the wrong layer.
