@@ -27,6 +27,10 @@ If PowerShell script execution is blocked, use:
 .\run-claw.bat prompt "summarize this repository"
 ```
 
+### Optional launcher with a placeholder API key line
+
+[`run-claw.local.ps1`](./run-claw.local.ps1) is tracked in the repo with a placeholder (`PUT_YOUR_OPENROUTER_API_KEY_HERE`). Edit that one string to your real OpenRouter key, then run it like `.\run-claw.ps1`. If you put a real key in the file, **do not commit or push** that change to a public repository.
+
 ## Build From Source
 
 ```powershell
