@@ -2,34 +2,32 @@
 
 This guide is for people trying to get the engine running quickly from this repository.
 
-If you are brand new, make `doctor` your first command after setting OpenRouter credentials.
+**Credentials live in one place:** a file named `.env` in the **repo root** (same folder as `README.md`). Copy [`.env.example`](./.env.example) to `.env`, edit `OPENAI_API_KEY` once, and use [`run-claw.ps1`](./run-claw.ps1) / [`run-claw.bat`](./run-claw.bat) so the working directory is that folder—`claw` then loads `.env` automatically. The file `.env` is gitignored so your key is not committed.
+
+If you are brand new, run `doctor` after creating `.env`.
 
 ## Fastest Path on Windows
 
 From the repo root in PowerShell:
 
 ```powershell
-$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
-$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
-.\run-claw.ps1 doctor
-.\run-claw.ps1
+Copy-Item .\.env.example .\.env
+notepad .\.env
 ```
 
-For a one-shot prompt:
+Set `OPENAI_API_KEY` (and keep `OPENAI_BASE_URL` as in the template), save, then:
 
 ```powershell
+.\run-claw.ps1 doctor
 .\run-claw.ps1 prompt "summarize this repository"
 ```
 
-If PowerShell script execution is blocked, use:
+If PowerShell script execution is blocked, `run-claw.bat` does the same thing:
 
 ```powershell
+.\run-claw.bat doctor
 .\run-claw.bat prompt "summarize this repository"
 ```
-
-### Optional launcher with a placeholder API key line
-
-[`run-claw.local.ps1`](./run-claw.local.ps1) is tracked in the repo with a placeholder (`PUT_YOUR_OPENROUTER_API_KEY_HERE`). Edit that one string to your real OpenRouter key, then run it like `.\run-claw.ps1`. If you put a real key in the file, **do not commit or push** that change to a public repository.
 
 ## Build From Source
 
@@ -51,14 +49,14 @@ cargo build --workspace
 
 ## Credentials (OpenRouter)
 
-PowerShell:
+**Default (recommended):** repo-root `.env` only—see [`.env.example`](./.env.example). You should not need to paste the same key into PowerShell, Bash, and docs; edit `.env` once.
+
+**Optional (CI or advanced):** set the same variable names in the process environment instead of (or overriding) `.env`:
 
 ```powershell
 $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 $env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 ```
-
-Bash:
 
 ```bash
 export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
@@ -148,16 +146,14 @@ Built-in model aliases:
 
 ## How routing works with OpenRouter
 
-Traffic goes to the host in `OPENAI_BASE_URL` (OpenRouter’s OpenAI-compatible API). Choose a model id OpenRouter exposes; namespaced ids such as `openai/...` map cleanly to the OpenAI-compatible wire path. If a request fails with auth errors, confirm both `OPENAI_BASE_URL` and `OPENAI_API_KEY` are set and that the model id exists on OpenRouter.
+Traffic goes to the host in `OPENAI_BASE_URL` (OpenRouter’s OpenAI-compatible API). Choose a model id OpenRouter exposes; namespaced ids such as `openai/...` map cleanly to the OpenAI-compatible wire path. If a request fails with auth errors, confirm both values are correct in **`.env`** (or in the environment) and that the model id exists on OpenRouter.
 
 ## 401 Fixes
 
-- Use an OpenRouter key in `OPENAI_API_KEY` (`sk-or-v1-...`), not a key from another vendor.
+- Use an OpenRouter key in `OPENAI_API_KEY` (keys often look like `sk-or-v1-...`), not a key from another vendor.
 - Keep `OPENAI_BASE_URL` on `https://openrouter.ai/api/v1` unless OpenRouter documents a different base URL for your account type.
 
-## Portable `.env`
-
-The CLI help notes that a `.env` beside the executable or in the working directory can provide `OPENAI_API_KEY` and `OPENAI_BASE_URL` for portable OpenRouter-style setups. A starter template is included in [`.env.example`](./.env.example).
+The CLI also reads `.env` beside `bin\windows\claw.exe` if you run the exe without going through the repo root; the **recommended** layout is still repo-root `.env` plus `run-claw.ps1` / `run-claw.bat`.
 
 ## Session Files
 

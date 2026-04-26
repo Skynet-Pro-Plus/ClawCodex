@@ -7,9 +7,8 @@
   Uses bin\windows\claw.exe. Pass any normal claw arguments after the script name,
   e.g.  .\run-claw.ps1 prompt "hello"   or   .\run-claw.ps1 --help
 
-  Set OpenRouter credentials before use (environment or repo-root .env):
-    $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
-    $env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
+  Credentials: put OpenRouter settings in a repo-root `.env` (copy from .env.example).
+  Optional: set OPENAI_BASE_URL and OPENAI_API_KEY in the shell instead (CI/advanced).
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -26,17 +25,18 @@ $openrouterBaseOk = $false
 if ($base) {
     $openrouterBaseOk = $base.ToLowerInvariant().Contains("openrouter")
 }
-$hasAuth = [bool]($env:OPENAI_API_KEY -and $openrouterBaseOk)
+$hasAuthFromEnv = [bool]($env:OPENAI_API_KEY -and $openrouterBaseOk)
+$dotenvPath = Join-Path $RepoRoot ".env"
+$hasDotenvFile = Test-Path -LiteralPath $dotenvPath
 
-if (-not $hasAuth) {
-    Write-Host "OpenRouter credentials not detected in the environment." -ForegroundColor Yellow
-    Write-Host "Set both variables, or copy .env.example to .env in this repo folder." -ForegroundColor Yellow
-    Write-Host '  $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"' -ForegroundColor Cyan
-    Write-Host '  $env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"' -ForegroundColor Cyan
+if (-not $hasAuthFromEnv -and -not $hasDotenvFile) {
+    Write-Host "OpenRouter: no credentials yet." -ForegroundColor Yellow
+    Write-Host "  One place only: copy .env.example to .env in this repo folder, edit OPENAI_API_KEY once, then run this script again." -ForegroundColor Yellow
+    Write-Host "  (Advanced: set OPENAI_BASE_URL + OPENAI_API_KEY in your shell instead of using .env.)" -ForegroundColor DarkGray
     Write-Host ""
 }
 
-# Run with cwd = repo root so a repo-root .env is found even if you started this script from elsewhere.
+# Run with cwd = repo root so repo-root .env is found even if you started this script from elsewhere.
 Push-Location -LiteralPath $RepoRoot
 try {
     & $ClawExe @args

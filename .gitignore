@@ -1,3 +1,6 @@
+# OpenRouter credentials — create once from .env.example; never commit real values.
+.env
+
 __pycache__/
 archive/
 .omx/
