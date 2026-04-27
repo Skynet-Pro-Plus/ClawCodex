@@ -198,6 +198,9 @@ fn doctor_command_runs_as_a_local_shell_entrypoint() {
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .env("CLAW_NO_CREDENTIAL_PROMPT", "1")
         .arg("doctor")
         .output()
         .expect("claw doctor should launch");
