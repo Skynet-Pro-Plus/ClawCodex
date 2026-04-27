@@ -31,24 +31,29 @@ struct ModelsEnvelope {
 /// Whether the REPL should offer the OpenRouter model picker before connecting.
 #[must_use]
 pub fn should_run_openrouter_repl_model_picker(model_explicit: bool) -> bool {
+    let skip_env = std::env::var("CLAW_SKIP_OPENROUTER_MODEL_PICKER")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let stdin_terminal = io::stdin().is_terminal();
+    let stdout_terminal = io::stdout().is_terminal();
+    let has_key = api::has_api_key("OPENAI_API_KEY");
+    let base = read_openai_compat_base_url(OpenAiCompatConfig::openai());
+    let base_is_openrouter = base.contains("openrouter");
+
     if model_explicit {
         return false;
     }
-    if std::env::var("CLAW_SKIP_OPENROUTER_MODEL_PICKER")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if skip_env {
         return false;
     }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+    if !stdin_terminal || !stdout_terminal {
         return false;
     }
-    if !api::has_api_key("OPENAI_API_KEY") {
+    if !has_key {
         return false;
     }
-    let base = read_openai_compat_base_url(OpenAiCompatConfig::openai());
-    base.contains("openrouter")
+    base_is_openrouter
 }
 
 fn provider_title_case(provider_id: &str) -> String {

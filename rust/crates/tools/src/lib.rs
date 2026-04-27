@@ -422,12 +422,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "Write a text file in the workspace. Input must be one object: `path` (repo-relative path) and `content` (full file text). This is not TodoWrite — do not send `todos` here.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "content": { "type": "string" }
+                    "path": { "type": "string", "description": "Workspace-relative path, e.g. games/demo/main.py" },
+                    "content": { "type": "string", "description": "Entire file contents" }
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
@@ -1209,7 +1209,13 @@ fn execute_tool_with_enforcer(
         }
         "write_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<WriteFileInput>(input).and_then(run_write_file)
+            from_value::<WriteFileInput>(input)
+                .map_err(|e| {
+                    format!(
+                        "{e}. write_file requires {{\"path\":\"relative/path.ext\",\"content\":\"...\"}}; it is not TodoWrite (no `todos` key)."
+                    )
+                })
+                .and_then(run_write_file)
         }
         "edit_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -2244,7 +2250,10 @@ struct ReadFileInput {
 
 #[derive(Debug, Deserialize)]
 struct WriteFileInput {
+    /// Some models emit `file_path` / `filePath` / `target` instead of `path`.
+    #[serde(alias = "file_path", alias = "filePath", alias = "target", alias = "target_path")]
     path: String,
+    #[serde(alias = "body", alias = "text")]
     content: String,
 }
 
