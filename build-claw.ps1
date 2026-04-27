@@ -36,5 +36,12 @@ if (-not (Test-Path -LiteralPath $ReleaseExe)) {
 
 $outDir = Split-Path $OutExe -Parent
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-Copy-Item -LiteralPath $ReleaseExe -Destination $OutExe -Force
-Write-Host "Updated: $OutExe" -ForegroundColor Green
+try {
+    Copy-Item -LiteralPath $ReleaseExe -Destination $OutExe -Force -ErrorAction Stop
+    Write-Host "Updated: $OutExe" -ForegroundColor Green
+} catch {
+    $fallback = Join-Path $outDir "claw.exe.new"
+    Copy-Item -LiteralPath $ReleaseExe -Destination $fallback -Force
+    Write-Host "Could not overwrite $OutExe (file may be in use). Wrote: $fallback" -ForegroundColor Yellow
+    Write-Host "Close any process using claw.exe, delete or rename the old binary, then rename claw.exe.new -> claw.exe" -ForegroundColor Yellow
+}

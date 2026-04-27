@@ -846,7 +846,8 @@ mod tests {
     fn estimate_api_request_tokens_includes_system_prompt() {
         let messages = vec![ConversationMessage::user_text("hello")];
         let est_empty = estimate_api_request_tokens(&[], &messages);
-        let est_sys = estimate_api_request_tokens(&["alpha".to_string(), "beta".to_string()], &messages);
+        let est_sys =
+            estimate_api_request_tokens(&["alpha".to_string(), "beta".to_string()], &messages);
         assert!(est_sys > est_empty);
     }
 }

@@ -122,7 +122,12 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
         .cwd
         .clone()
         .or_else(|| env::current_dir().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "could not resolve working directory"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "could not resolve working directory",
+            )
+        })?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
     if let Some(preflight) = try_preflight_bash_command(&input.command, &input) {
@@ -309,16 +314,31 @@ fn rewrite_command_for_shell<'a>(command: &'a str, shell_program: &str) -> Cow<'
     }
 }
 
-fn try_preflight_bash_command(command: &str, input: &BashCommandInput) -> Option<BashCommandOutput> {
+fn try_preflight_bash_command(
+    command: &str,
+    input: &BashCommandInput,
+) -> Option<BashCommandOutput> {
     const PREFLIGHT_TOKENS: &[&str] = &[
-        "pip", "pip3", "python", "python3", "head", "grep", "find", "sed", "awk", "powershell",
+        "pip",
+        "pip3",
+        "python",
+        "python3",
+        "head",
+        "grep",
+        "find",
+        "sed",
+        "awk",
+        "powershell",
     ];
     let token = first_shell_command_token(command)?;
     let lower = token.to_ascii_lowercase();
     if !PREFLIGHT_TOKENS.iter().any(|t| *t == lower.as_str()) {
         return None;
     }
-    if !lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !lower
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
     if bash_command_exists(&lower) {
@@ -366,29 +386,27 @@ fn strip_leading_env_assignment(s: &str) -> Option<&str> {
     let trimmed = s.trim_start();
     let pos = trimmed.find('=')?;
     let name = trimmed[..pos].trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
     let after_eq = trimmed[pos + 1..].trim_start();
     // Require a single-token value (`VAR=val cmd`) so values like `1` do not consume the command word.
-    let value_end = after_eq
-        .find(char::is_whitespace)
-        .filter(|&idx| idx > 0)?;
+    let value_end = after_eq.find(char::is_whitespace).filter(|&idx| idx > 0)?;
     Some(after_eq[value_end..].trim_start())
 }
 
 pub(crate) fn preflight_hint(token: &str) -> String {
     let suggestion = match token {
         "pip" | "pip3" => "Try: python -m pip install … (or use the PowerShell tool on Windows).",
-        "python" | "python3" => "Try: py -3 … or use the PowerShell tool with an explicit Python path.",
+        "python" | "python3" => {
+            "Try: py -3 … or use the PowerShell tool with an explicit Python path."
+        }
         "head" => "On Windows PowerShell use: Get-Content -Path FILE -TotalCount N",
         "grep" => "On Windows PowerShell use: Select-String -Path FILE -Pattern PAT",
         "find" => "On Windows PowerShell use: Get-ChildItem -Recurse",
-        "powershell" => "Use the dedicated PowerShell tool instead of invoking powershell from bash.",
+        "powershell" => {
+            "Use the dedicated PowerShell tool instead of invoking powershell from bash."
+        }
         _ => "Use the PowerShell tool or fix PATH for this shell.",
     };
     format!("command '{token}' was not found in this bash environment. {suggestion}")

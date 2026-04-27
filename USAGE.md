@@ -2,29 +2,42 @@
 
 This guide is for people trying to get the engine running quickly from this repository.
 
-If you are brand new, make `doctor` your first command after setting credentials.
+## TL;DR (Windows)
 
-## Fastest Path on Windows
+1. Double-click [`START-CLAW.bat`](./START-CLAW.bat).
+2. If no key is saved, or OpenRouter rejects the saved key, paste a valid OpenRouter key in that same Command Prompt window.
+3. Claw saves it to local `.env`, verifies the key with OpenRouter, runs `doctor`, then launches; later runs validate the saved key before continuing.
 
-From the repo root in PowerShell:
+**Credentials live in one place:** a file named `.env` in the **repo root** (same folder as `README.md`). The file is gitignored.
 
-```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
-.\run-claw.ps1 doctor
-.\run-claw.ps1
-```
+**`claw doctor` vs a real key:** `doctor` is a *local* report (files/env/workspace). It does **not** call OpenRouter, so it cannot tell you if the key is wrong. `START-CLAW.bat` does the live OpenRouter check before `doctor`. For a **terminal-friendly live check** (missing / placeholder / HTTP 401 / no response / OK):
 
-For a one-shot prompt:
+- Double-click **[`CHECK-KEY.bat`](./CHECK-KEY.bat)** — the window **prints the full command** first, then runs it — or **[`OPEN-KEY-CHECK-WINDOW.bat`](./OPEN-KEY-CHECK-WINDOW.bat)** to open a **new** Command Prompt with the same flow. You can also run from the repo root:  
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .\validate-openrouter.ps1`  
+- **`START-CLAW.bat`** runs this check automatically *before* `doctor`. If the key is missing, rejected, or OpenRouter gives no usable response, it prompts for a replacement key in the same terminal, saves it to `.env`, then revalidates before launching.
 
-```powershell
-.\run-claw.ps1 prompt "summarize this repository"
-```
+**Update the key from the terminal (no Notepad):** double-click **[`UPDATE-KEY.bat`](./UPDATE-KEY.bat)** or run  
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\set-openrouter-key.ps1`  
+from the repo root. It prompts with **hidden input**, writes **`OPENAI_API_KEY`** into **`.env`**, then runs the same **live OpenRouter** check unless you pass **`-NoVerify`**.
 
-If PowerShell script execution is blocked, use:
+## Fastest Path on Windows (one click)
 
-```powershell
-.\run-claw.bat prompt "summarize this repository"
-```
+1. Double-click **[`START-CLAW.bat`](./START-CLAW.bat)** in File Explorer (or use [`open-cmd-here.bat`](./open-cmd-here.bat) — same flow).
+2. A Command Prompt opens and runs a **live authenticated OpenRouter check**. If the key is missing, invalid, or OpenRouter does not respond, the same terminal prompts for a replacement key with hidden input, saves **`.env`** next to `README.md`, and checks again.
+3. After the key validates, the launcher runs **`claw doctor`** and starts Claw.
+4. In that same window, run the engine anytime:
+   - `run-claw.bat` — interactive REPL  
+   - `run-claw.bat prompt "summarize this repository"`
+
+If the OpenRouter model picker appears, the list is pre-filtered to Claw-compatible models (tool-calling + text-only output + large context). It excludes obvious TTS/STT/audio models that are not used by the coder, and each entry shows input/output token pricing per 1M tokens when OpenRouter provides pricing data.
+
+If **`doctor` never asks for a key**, your `bin\windows\claw.exe` may be older than the source: from PowerShell run **`.\build-claw.ps1`**, then double-click **`START-CLAW.bat`** again.
+
+**Manual `.env` instead:** copy [`.env.example`](./.env.example) to `.env`, edit `OPENAI_API_KEY` once, then `run-claw.bat doctor`.
+
+**Interactive behavior details:** the save-once prompt runs for text `doctor` / REPL / text `prompt`. Set `CLAW_NO_CREDENTIAL_PROMPT=1` to disable (CI/scripts). JSON `doctor` skips the prompt.
+
+**PowerShell:** `.\run-claw.ps1 doctor` / `.\run-claw.ps1` from the repo root — same binary, same `.env` rules.
 
 ## Build From Source
 
@@ -44,49 +57,25 @@ cargo build --workspace
 ./target/debug/claw prompt "say hello"
 ```
 
-## Credentials
+## Credentials (OpenRouter)
 
-### Anthropic API key
+`START-CLAW.bat` validates your key with a free, model-agnostic `GET /v1/auth/key` request. That proves a normal OpenRouter key works without spending tokens and without depending on any specific model allow-list. It is **not** the same as `GET /v1/credits`, which requires a **management** key and will 401 for standard keys.
 
-PowerShell:
+**Default (recommended):** repo-root `.env` only—see [`.env.example`](./.env.example). You should not need to paste the same key into PowerShell, Bash, and docs; edit `.env` once. The Windows helper batch files temporarily clear inherited `OPENAI_API_KEY` and `OPENAI_BASE_URL` values so stale shell variables cannot shadow `.env` during validation.
+
+**Optional (CI or advanced):** set the same variable names in the process environment instead of (or overriding) `.env`:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
+$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+$env:OPENAI_API_KEY = "YOUR_OPENROUTER_KEY_HERE"
 ```
-
-Bash:
-
-```bash
-export ANTHROPIC_API_KEY="YOUR_API_KEY_HERE"
-```
-
-### Anthropic bearer token
-
-Use this only for an OAuth/proxy bearer token, not for an `sk-ant-*` API key.
-
-```bash
-export ANTHROPIC_AUTH_TOKEN="anthropic-oauth-or-proxy-bearer-token"
-```
-
-### OpenRouter
 
 ```bash
 export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-export OPENAI_API_KEY="YOUR_API_KEY_HERE"
+export OPENAI_API_KEY="YOUR_OPENROUTER_KEY_HERE"
 ```
 
-### Ollama
-
-```bash
-export OPENAI_BASE_URL="http://127.0.0.1:11434/v1"
-unset OPENAI_API_KEY
-```
-
-### DashScope / Qwen
-
-```bash
-export DASHSCOPE_API_KEY="YOUR_API_KEY_HERE"
-```
+Pick a model from the OpenRouter catalog and pass `--model <id>` when needed (for example `openai/gpt-4.1-mini`).
 
 ## Common Commands
 
@@ -167,25 +156,16 @@ Built-in model aliases:
 - `sonnet` -> `claude-sonnet-4-6`
 - `haiku` -> `claude-haiku-4-5-20251213`
 
-## How Provider Detection Works
+## How routing works with OpenRouter
 
-1. If the model starts with `claude`, Claw uses the Anthropic provider.
-2. If the model starts with `grok`, Claw uses xAI.
-3. If the model starts with `openai/`, `gpt-`, `qwen/`, or `qwen-`, Claw uses the OpenAI-compatible path.
-4. Otherwise Claw falls back to whichever matching credential is present.
+Traffic goes to the host in `OPENAI_BASE_URL` (OpenRouter’s OpenAI-compatible API). Choose a model id OpenRouter exposes; namespaced ids such as `openai/...` map cleanly to the OpenAI-compatible wire path. If a request fails with auth errors, confirm both values are correct in **`.env`** (or in the environment) and that the model id exists on OpenRouter.
 
 ## 401 Fixes
 
-The most common auth mistake is putting an `sk-ant-*` API key into `ANTHROPIC_AUTH_TOKEN`.
+- Use an OpenRouter key in `OPENAI_API_KEY` (keys often look like `sk-or-v1-...`), not a key from another vendor.
+- Keep `OPENAI_BASE_URL` on `https://openrouter.ai/api/v1` unless OpenRouter documents a different base URL for your account type.
 
-Use:
-
-- `ANTHROPIC_API_KEY` for Anthropic API keys
-- `ANTHROPIC_AUTH_TOKEN` for bearer tokens from a proxy or OAuth flow
-
-## Portable `.env`
-
-The CLI help notes that a `.env` beside the executable or in the working directory can provide `OPENAI_API_KEY` and `OPENAI_BASE_URL` for portable OpenRouter-style setups. A starter template is included in [`.env.example`](./.env.example).
+The CLI also reads `.env` beside `bin\windows\claw.exe` if you run the exe without going through the repo root; the **recommended** layout is still repo-root `.env` plus `run-claw.ps1` / `run-claw.bat`.
 
 ## Session Files
 

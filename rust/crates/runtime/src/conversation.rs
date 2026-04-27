@@ -10,7 +10,6 @@ use crate::compact::{
     compact_session, estimate_api_request_tokens, estimate_session_tokens, CompactionConfig,
     CompactionResult,
 };
-use crate::tool_output::{tool_result_truncation_limit, truncate_tool_output};
 use crate::config::{CompletionVerifyConfig, RuntimeFeatureConfig};
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
 use crate::permissions::{
@@ -18,6 +17,7 @@ use crate::permissions::{
 };
 use crate::sandbox::FilesystemIsolationMode;
 use crate::session::{ContentBlock, ConversationMessage, Session};
+use crate::tool_output::{tool_result_truncation_limit, truncate_tool_output};
 use crate::usage::{TokenUsage, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
@@ -363,7 +363,10 @@ where
             return;
         }
         let ws = self.completion_verify_workspace();
-        eprintln!("verify.skipped: no project markers detected in {}", ws.display());
+        eprintln!(
+            "verify.skipped: no project markers detected in {}",
+            ws.display()
+        );
     }
 
     fn run_completion_verify(&self) -> Result<(), String> {
@@ -415,8 +418,7 @@ where
             .saturating_mul(90)
             .saturating_div(100)
             .max(1024);
-        let mut estimate =
-            estimate_api_request_tokens(&self.system_prompt, &self.session.messages);
+        let mut estimate = estimate_api_request_tokens(&self.system_prompt, &self.session.messages);
         if estimate <= soft_limit {
             return Ok(());
         }

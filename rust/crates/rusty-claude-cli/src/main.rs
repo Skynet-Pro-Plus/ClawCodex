@@ -8,6 +8,7 @@
 )]
 mod init;
 mod input;
+mod openrouter_first_run;
 mod openrouter_picker;
 mod render;
 
@@ -26,12 +27,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    detect_provider_kind, has_api_key, max_tokens_for_model, read_openai_compat_base_url,
-    resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta,
-    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
-    OpenAiCompatConfig,
+    detect_provider_kind, has_api_key, max_tokens_for_model, read_openai_api_key,
+    read_openai_base_url_explicit, read_openai_compat_base_url, resolve_startup_auth_source,
+    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    MessageRequest, MessageResponse, OpenAiCompatConfig, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -43,6 +44,9 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
+use openrouter_first_run::{
+    ensure_openrouter_credentials_for_doctor, ensure_openrouter_credentials_if_needed,
+};
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
@@ -247,7 +251,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
-            let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode, None)?;
+            let mut cli = LiveCli::new(
+                model,
+                true,
+                allowed_tools,
+                permission_mode,
+                None,
+                output_format == CliOutputFormat::Text,
+            )?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
@@ -299,7 +310,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 allow_broad_cwd,
                 model_context_window,
             )?;
-        },
+        }
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
     }
@@ -864,7 +875,7 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
 
 fn removed_auth_surface_error(command_name: &str) -> String {
     format!(
-        "`claw {command_name}` has been removed. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+        "`claw {command_name}` has been removed. Configure OpenRouter: set OPENAI_BASE_URL to https://openrouter.ai/api/v1 and OPENAI_API_KEY to your OpenRouter key (or place both in a .env beside claw.exe or the working directory)."
     )
 }
 
@@ -1594,6 +1605,7 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
 }
 
 fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_openrouter_credentials_for_doctor(output_format == CliOutputFormat::Text)?;
     let report = render_doctor_report()?;
     let message = report.render();
     match output_format {
@@ -1676,32 +1688,38 @@ fn run_mcp_serve() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(clippy::too_many_lines)]
 fn check_auth_health() -> DiagnosticCheck {
-    let api_key_present = env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let auth_token_present = env::var("ANTHROPIC_AUTH_TOKEN")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let openai_api_key_present = read_openai_api_key().is_some();
+    let openrouter_base_ok = read_openai_base_url_explicit()
+        .as_deref()
+        .is_some_and(|value| value.to_lowercase().contains("openrouter"));
+    let openrouter_ready = openai_api_key_present && openrouter_base_ok;
+    let base_url_label = if read_openai_base_url_explicit().is_none() {
+        "absent"
+    } else if openrouter_base_ok {
+        "openrouter"
+    } else {
+        "set (expected URL containing \"openrouter\")"
+    };
     let env_details = format!(
-        "Environment       api_key={} auth_token={}",
-        if api_key_present { "present" } else { "absent" },
-        if auth_token_present {
+        "OpenRouter          OPENAI_API_KEY={} OPENAI_BASE_URL={}",
+        if openai_api_key_present {
             "present"
         } else {
             "absent"
-        }
+        },
+        base_url_label
     );
 
     match load_oauth_credentials() {
         Ok(Some(token_set)) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || auth_token_present {
+            if openrouter_ready {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || auth_token_present {
-                "supported auth env vars are configured; legacy saved OAuth is ignored"
+            if openrouter_ready {
+                "OpenRouter credentials are configured; legacy saved OAuth is ignored"
             } else {
                 "legacy saved OAuth credentials are present but unsupported"
             },
@@ -1724,12 +1742,19 @@ fn check_auth_health() -> DiagnosticCheck {
                     token_set.scopes.join(",")
                 }
             ),
-            "Suggested action  set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN; `claw login` is removed"
+            "Suggested action  set OPENAI_BASE_URL=https://openrouter.ai/api/v1 and OPENAI_API_KEY; `claw login` is removed"
                 .to_string(),
         ])
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), json!(true)),
             (
                 "legacy_saved_oauth_expires_at".to_string(),
@@ -1743,21 +1768,28 @@ fn check_auth_health() -> DiagnosticCheck {
         ])),
         Ok(None) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || auth_token_present {
+            if openrouter_ready {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || auth_token_present {
-                "supported auth env vars are configured"
+            if openrouter_ready {
+                "OpenRouter credentials are configured"
             } else {
-                "no supported auth env vars were found"
+                "OpenRouter credentials were not found (set OPENAI_BASE_URL to the OpenRouter API and OPENAI_API_KEY)"
             },
         )
         .with_details(vec![env_details])
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), json!(false)),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
             ("legacy_refresh_token_present".to_string(), json!(false)),
@@ -1769,8 +1801,15 @@ fn check_auth_health() -> DiagnosticCheck {
             format!("failed to inspect legacy saved credentials: {error}"),
         )
         .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
+            ("openrouter_ready".to_string(), json!(openrouter_ready)),
+            (
+                "openai_api_key_present".to_string(),
+                json!(openai_api_key_present),
+            ),
+            (
+                "openrouter_base_url_ok".to_string(),
+                json!(openrouter_base_ok),
+            ),
             ("legacy_saved_oauth_present".to_string(), Value::Null),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
             ("legacy_refresh_token_present".to_string(), Value::Null),
@@ -3150,12 +3189,9 @@ fn run_stale_base_preflight(flag_value: Option<&str>) {
 
 #[allow(clippy::needless_pass_by_value)]
 fn model_context_window_from_env() -> Option<u32> {
-    std::env::var("CLAW_MODEL_CONTEXT_WINDOW").ok().and_then(|raw| {
-        raw.trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|&n| n > 0)
-    })
+    std::env::var("CLAW_MODEL_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok().filter(|&n| n > 0))
 }
 
 fn run_repl(
@@ -3176,6 +3212,7 @@ fn run_repl(
         allowed_tools,
         permission_mode,
         model_context_window,
+        true,
     )?;
     cli.set_reasoning_effort(reasoning_effort);
     let mut editor =
@@ -3747,7 +3784,9 @@ impl LiveCli {
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         model_context_window: Option<u32>,
+        allow_credential_prompt: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        ensure_openrouter_credentials_if_needed(&model, allow_credential_prompt)?;
         let model_context_window = model_context_window.or_else(model_context_window_from_env);
         let system_prompt = build_system_prompt()?;
         let session_state = new_cli_session()?;
@@ -8843,10 +8882,7 @@ mod tests {
         let _guard = env_lock();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
         std::env::remove_var("CLAW_MODEL_CONTEXT_WINDOW");
-        let args = vec![
-            "--model".to_string(),
-            "openai/gpt-4.1-mini".to_string(),
-        ];
+        let args = vec!["--model".to_string(), "openai/gpt-4.1-mini".to_string()];
         match parse_args(&args).expect("args should parse") {
             CliAction::Repl {
                 model,
@@ -9355,9 +9391,11 @@ mod tests {
     #[test]
     fn removed_login_and_logout_subcommands_error_helpfully() {
         let login = parse_args(&["login".to_string()]).expect_err("login should be removed");
-        assert!(login.contains("ANTHROPIC_API_KEY"));
+        assert!(login.contains("OPENAI_API_KEY"));
+        assert!(login.to_lowercase().contains("openrouter"));
         let logout = parse_args(&["logout".to_string()]).expect_err("logout should be removed");
-        assert!(logout.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(logout.contains("OPENAI_API_KEY"));
+        assert!(logout.to_lowercase().contains("openrouter"));
         assert_eq!(
             parse_args(&["doctor".to_string()]).expect("doctor should parse"),
             CliAction::Doctor {
@@ -10261,6 +10299,7 @@ mod tests {
                 None,
                 PermissionMode::DangerFullAccess,
                 None,
+                false,
             )
             .expect("cli should initialize")
             .startup_banner()

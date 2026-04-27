@@ -1342,6 +1342,13 @@ pub fn read_openai_api_key() -> Option<String> {
     read_env_non_empty("OPENAI_API_KEY").ok().flatten()
 }
 
+/// Read `OPENAI_BASE_URL` when explicitly set (environment or `.env`); does not substitute the
+/// default OpenAI API host.
+#[must_use]
+pub fn read_openai_base_url_explicit() -> Option<String> {
+    read_env_non_empty("OPENAI_BASE_URL").ok().flatten()
+}
+
 #[must_use]
 pub fn read_base_url(config: OpenAiCompatConfig) -> String {
     if let Ok(value) = std::env::var(config.base_url_env) {

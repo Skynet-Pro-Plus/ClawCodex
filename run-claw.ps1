@@ -7,8 +7,10 @@
   Uses bin\windows\claw.exe. Pass any normal claw arguments after the script name,
   e.g.  .\run-claw.ps1 prompt "hello"   or   .\run-claw.ps1 --help
 
-  Set at least one provider credential before use, for example:
-    $env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
+  Prefer run-claw.bat if you want Command Prompt without invoking PowerShell.
+
+  Credentials: put OpenRouter settings in a repo-root `.env` (copy from .env.example),
+  or let claw prompt once on first run (see USAGE.md). Optional: set env vars for CI.
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -20,18 +22,26 @@ if (-not (Test-Path -LiteralPath $ClawExe)) {
     exit 1
 }
 
-$hasAuth =
-    $env:ANTHROPIC_API_KEY -or $env:ANTHROPIC_AUTH_TOKEN -or
-    $env:OPENAI_API_KEY -or $env:XAI_API_KEY -or $env:DASHSCOPE_API_KEY
+$base = $env:OPENAI_BASE_URL
+$openrouterBaseOk = $false
+if ($base) {
+    $openrouterBaseOk = $base.ToLowerInvariant().Contains("openrouter")
+}
+$hasAuthFromEnv = [bool]($env:OPENAI_API_KEY -and $openrouterBaseOk)
+$dotenvPath = Join-Path $RepoRoot ".env"
+$hasDotenvFile = Test-Path -LiteralPath $dotenvPath
 
-if (-not $hasAuth) {
-    Write-Host "No API key / token detected in the environment." -ForegroundColor Yellow
-    Write-Host "Set one before running, for example (Anthropic):" -ForegroundColor Yellow
-    Write-Host '  $env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"' -ForegroundColor Cyan
-    Write-Host "OpenRouter-style example:" -ForegroundColor Yellow
-    Write-Host '  $env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"' -ForegroundColor Cyan
-    Write-Host '  $env:OPENAI_API_KEY = "YOUR_API_KEY_HERE"' -ForegroundColor Cyan
+if (-not $hasAuthFromEnv -and -not $hasDotenvFile) {
+    Write-Host "OpenRouter: no credentials yet." -ForegroundColor Yellow
+    Write-Host "  One place only: copy .env.example to .env in this repo folder, edit OPENAI_API_KEY once, then run this script again." -ForegroundColor Yellow
+    Write-Host "  (Advanced: set OPENAI_BASE_URL + OPENAI_API_KEY in your shell instead of using .env.)" -ForegroundColor DarkGray
     Write-Host ""
 }
 
-& $ClawExe @args
+# Run with cwd = repo root so repo-root .env is found even if you started this script from elsewhere.
+Push-Location -LiteralPath $RepoRoot
+try {
+    & $ClawExe @args
+} finally {
+    Pop-Location
+}

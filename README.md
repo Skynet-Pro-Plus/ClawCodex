@@ -20,19 +20,66 @@ ClawCodex is a packaged distribution of the `claw` CLI agent harness with the Ru
 
 This repository is published for research and experimentation only. It is not an official release channel, not a supported production product, and not affiliated with Anthropic.
 
+## Install And Run (Windows)
+
+ClawCodex is ready to run from this repo on Windows. The upgraded launcher handles the OpenRouter setup for you.
+
+If you do not have the repo yet:
+
+```powershell
+git clone https://github.com/Skynet-Pro-Plus/ClawCodex C:\clawcodex
+cd C:\clawcodex
+```
+
+1. Open the repo folder, for example `C:\clawcodex`.
+2. Double-click [`START-CLAW.bat`](./START-CLAW.bat).
+3. If no OpenRouter key is saved, paste your key in that same Command Prompt window. Input is hidden.
+4. The launcher saves the key to repo-root `.env`, validates it with OpenRouter using `GET /v1/auth/key`, runs `claw doctor`, and starts Claw.
+5. Future launches re-check the saved key before starting, so bad or stale keys are caught before the engine opens.
+
+Useful follow-up commands from the repo root:
+
+```bat
+run-claw.bat
+run-claw.bat prompt "say hello"
+CHECK-KEY.bat
+UPDATE-KEY.bat
+```
+
+Use [`CHECK-KEY.bat`](./CHECK-KEY.bat) to verify the saved key without launching Claw. Use [`UPDATE-KEY.bat`](./UPDATE-KEY.bat) to replace the key from the terminal without opening Notepad.
+
 This repo is set up so a new user can:
 
-1. Run the packaged Windows binary immediately.
-2. Rebuild the binary from source when needed.
-3. Use `claw doctor` as the first health check before deeper troubleshooting.
+1. **Windows:** double-click [`START-CLAW.bat`](./START-CLAW.bat) — Command Prompt opens, validates the saved OpenRouter key with a live authenticated request, prompts in the same terminal if the key is missing/invalid/no-response, saves a valid key to repo-root `.env`, then runs `claw doctor` and launches automatically.
+2. Run the packaged Windows binary from `run-claw.bat` / `run-claw.ps1` anytime.
+3. Rebuild the binary from source when needed ([`build-claw.ps1`](./build-claw.ps1)).
+
+## Recent updates
+
+- **OpenRouter-first documentation and health checks** — Put credentials **once** in a repo-root `.env` (copy from [`.env.example`](./.env.example)); `claw` reads it from the working directory. [`USAGE.md`](./USAGE.md) and Quick Start below follow that path so users are not asked to paste the same key in many places. `START-CLAW.bat` performs a free, model-agnostic `GET /v1/auth/key` OpenRouter key check before `claw doctor`; `doctor` remains a local-only health report. The API crate exposes `read_openai_base_url_explicit()` so diagnostics only treat an **explicit** `OPENAI_BASE_URL` as configured (see `rust/crates/api/src/providers/openai_compat.rs`).
+- **One-click Windows setup** — Double-click [`START-CLAW.bat`](./START-CLAW.bat) (same as [`open-cmd-here.bat`](./open-cmd-here.bat)): Command Prompt at repo root, live OpenRouter key validation first, same-window hidden key prompt if needed, `doctor` after validation, then automatic launch into Claw. [`run-claw.bat`](./run-claw.bat) invokes `claw.exe` directly (no PowerShell).
+- **First-run prompt behavior** — The prompt is in the same terminal window, not a pop-up. If `.env` already contains a usable OpenRouter key, the prompt is skipped and Claw starts immediately. `START-CLAW.bat` clears inherited `CLAW_NO_CREDENTIAL_PROMPT`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL` for the one-click interactive path so stale shell settings cannot mute setup or shadow `.env`; scripted callers can still use `CLAW_NO_CREDENTIAL_PROMPT=1` with `run-claw.bat`.
+- **Windows-friendly OpenRouter model picker** — The initial model list now filters to Claw-compatible entries (tool-calling + text-only output + large context windows), excludes obvious TTS/STT/audio models that are not useful for coding, and shows token pricing next to each model (`in/out` cost per 1M tokens) when OpenRouter returns pricing metadata.
+- **Command Prompt vs PowerShell** — Use one shell consistently; syntax is not interchangeable.
+
+| Shell | Easiest setup | Launch (repo root) |
+| ----- | -------------- | ------------------ |
+| **Command Prompt** | Double-click **`START-CLAW.bat`**, paste/update key if asked, then Claw starts after live validation. | `run-claw.bat …` |
+| **Manual / PowerShell** | Copy [`.env.example`](./.env.example) → `.env`, or `.\run-claw.ps1 …` | `.\run-claw.ps1 …` |
+
+More detail: [`USAGE.md`](./USAGE.md).
+
+- **Bundled binary** — This repo may ship a prebuilt [`bin/windows/claw.exe`](./bin/windows/claw.exe). To match **current** Rust sources on your machine, run [`build-claw.ps1`](./build-claw.ps1) locally; source changes can be committed without re-committing that large binary every time.
 
 ## What is in this repo
 
 - `rust/` - canonical Rust workspace and the `claw` CLI source
 - `bin/windows/claw.exe` - bundled Windows build for quick local startup
-- `run-claw.ps1` / `run-claw.bat` - launch helpers for Windows
+- `START-CLAW.bat` / `open-cmd-here.bat` - one-click Command Prompt onboarding, live OpenRouter key validation, `doctor`, and automatic Claw launch
+- `run-claw.bat` / `run-claw.ps1` - launch `claw.exe` from the repo root
+- `.env.example` - template for a **single** repo-root `.env` (gitignored) holding OpenRouter credentials
 - `build-claw.ps1` - rebuilds `bin/windows/claw.exe` from the Rust workspace
-- `USAGE.md` - copy/paste setup, auth, and common command examples
+- `USAGE.md` - setup, auth, and common command examples
 - `PARITY.md` - parity and migration status
 - `ROADMAP.md` - planned work and gaps
 - `src/` and `tests/` - companion Python/reference surfaces that should stay aligned with runtime behavior
@@ -190,19 +237,13 @@ Not every tool is available in every environment. Some depend on configured MCP 
 
 ### Windows: run the bundled binary
 
-Open PowerShell in the repo root and set a provider credential:
+**Easiest:** double-click [`START-CLAW.bat`](./START-CLAW.bat). Command Prompt opens at the repo root, performs a live OpenRouter key check, asks for a key if `.env` is missing/empty/rejected, saves and revalidates it, then runs `claw doctor` and launches Claw automatically.
 
-```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
-```
+When the OpenRouter model picker appears, it shows only Claw-compatible text/tool models with large context windows. Obvious TTS/STT/audio models are filtered out, and input/output pricing per 1M tokens is shown when OpenRouter provides pricing metadata.
 
-Then launch ClawCodex:
+**Manual:** copy [`.env.example`](./.env.example) to `.env`, set `OPENAI_API_KEY`, then run [`CHECK-KEY.bat`](./CHECK-KEY.bat) to validate it. After the key is accepted, launch with [`run-claw.bat`](./run-claw.bat) or [`run-claw.ps1`](./run-claw.ps1).
 
-```powershell
-.\run-claw.ps1
-```
-
-Useful first commands:
+From PowerShell in the repo root (optional):
 
 ```powershell
 .\run-claw.ps1 doctor
@@ -227,35 +268,18 @@ If you want to refresh the packaged Windows binary in `bin/windows/`:
 
 ## Authentication
 
-Anthropic direct API:
+This distribution documents **OpenRouter** as the supported path. Configure it **once** in repo-root `.env` (see [`.env.example`](./.env.example)), or let [`START-CLAW.bat`](./START-CLAW.bat) / [`UPDATE-KEY.bat`](./UPDATE-KEY.bat) write it for you. The validator uses OpenRouter's free, model-agnostic `GET /v1/auth/key` endpoint, so validation does not spend tokens and does not depend on a specific model allow-list.
 
-```powershell
-$env:ANTHROPIC_API_KEY = "YOUR_API_KEY_HERE"
-```
-
-OpenRouter:
-
-```powershell
-$env:OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
-$env:OPENAI_API_KEY = "YOUR_API_KEY_HERE"
-```
-
-Ollama:
-
-```powershell
-$env:OPENAI_BASE_URL = "http://127.0.0.1:11434/v1"
-Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
-```
-
-See [`USAGE.md`](./USAGE.md) for OpenAI-compatible, xAI, DashScope, proxy, and session-resume flows.
+Use an OpenRouter model id (for example `openai/gpt-4.1-mini` or another id from the OpenRouter catalog). Session resume and tooling flows are covered in [`USAGE.md`](./USAGE.md).
 
 ## First-Run Checklist
 
-1. Install Rust from [rustup.rs](https://rustup.rs/) if you need to build locally.
-2. Set one provider credential in your shell.
-3. Run `claw doctor`.
-4. Run a small prompt like `claw prompt "say hello"`.
-5. If you are on Windows and using the packaged build, prefer `run-claw.ps1` or `run-claw.bat`.
+1. **Windows:** double-click [`START-CLAW.bat`](./START-CLAW.bat) (or copy `.env.example` to `.env` by hand).
+2. Install Rust from [rustup.rs](https://rustup.rs/) if you need to build locally or refresh `bin\windows\claw.exe` via [`build-claw.ps1`](./build-claw.ps1).
+3. Run [`CHECK-KEY.bat`](./CHECK-KEY.bat) if you manually edited `.env` and want to verify the key before launching.
+4. Run `claw doctor` if you did not use `START-CLAW.bat` (it runs doctor for you).
+5. If Claw did not already launch from `START-CLAW.bat`, run a small prompt like `run-claw.bat prompt "say hello"` or `.\run-claw.ps1 prompt "say hello"`.
+6. Prefer `START-CLAW.bat` for one-click Command Prompt startup, `run-claw.bat` for existing Command Prompt windows, or `.\run-claw.ps1` in PowerShell.
 
 ## Troubleshooting
 
@@ -271,7 +295,13 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 .\build-claw.ps1
 ```
 
-- If you get a 401, double-check that you placed the credential in the correct env var. `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not interchangeable.
+If the script reports **`claw.exe.new`** instead of updating `claw.exe`, another program has the old binary open—close it, then replace `bin\windows\claw.exe` with `claw.exe.new` (or run `build-claw.ps1` again).
+
+- If `doctor` says `OpenRouter credentials are configured`, the first-run prompt already completed. The saved values live in repo-root `.env`; `START-CLAW.bat` will revalidate them before future launches.
+
+- If `doctor` says `OpenRouter key prompt skipped (CLAW_NO_CREDENTIAL_PROMPT=1)`, use [`START-CLAW.bat`](./START-CLAW.bat) for the interactive setup flow or unset that variable before running `run-claw.bat doctor`. `CLAW_NO_CREDENTIAL_PROMPT=1` is intended for CI/scripts.
+
+- If you get a 401, run [`CHECK-KEY.bat`](./CHECK-KEY.bat) and confirm the printed key fingerprint matches the OpenRouter key saved in `.env`. Also confirm `OPENAI_BASE_URL` is `https://openrouter.ai/api/v1` (or copy [`.env.example`](./.env.example) to `.env` in the repo root).
 
 - If a prompt fails and you are not sure why, run:
 
@@ -297,6 +327,10 @@ cargo test --workspace
 - [`rust/MOCK_PARITY_HARNESS.md`](./rust/MOCK_PARITY_HARNESS.md) - deterministic mock-service harness
 - [`ROADMAP.md`](./ROADMAP.md) - planned work
 - [`PHILOSOPHY.md`](./PHILOSOPHY.md) - project intent and design framing
+
+## Credits
+
+**Johnny Export** — This repository explicitly credits Johnny Export for his work and philosophy: treating autonomous agent coordination (not only the files on disk) as the product lesson, and centering the idea that **humans set direction while claws perform the labor**. See [`PHILOSOPHY.md`](./PHILOSOPHY.md) for the full framing and acknowledgment.
 
 ## Upstream Context
 

@@ -1047,9 +1047,11 @@ fn overlay_completion_verify_from_root(
     if let Some(ms) = optional_u64(verify, "timeoutMs", &format!("{context}.completionVerify"))? {
         cfg.timeout_ms = ms;
     }
-    if let Some(skip) =
-        optional_bool(verify, "skipIfNoTools", &format!("{context}.completionVerify"))?
-    {
+    if let Some(skip) = optional_bool(
+        verify,
+        "skipIfNoTools",
+        &format!("{context}.completionVerify"),
+    )? {
         cfg.skip_if_no_tools = skip;
     }
     Ok(())
