@@ -617,22 +617,20 @@ fn unix_msys_style_drive_path_to_windows(path: &str) -> Option<PathBuf> {
     let drive = (drive_byte as char).to_ascii_uppercase();
     let rest_start = match bytes.get(2) {
         None => {
-            return Some(PathBuf::from(format!("{drive}:\\")));
+            return Some(PathBuf::from(format!("{drive}:/")));
         }
         Some(b'/') => 3,
         _ => return None,
     };
 
     let tail = path.get(rest_start..)?.trim_start_matches('/');
-    if tail.is_empty() {
-        return Some(PathBuf::from(format!("{drive}:\\")));
+    let segments: Vec<&str> = tail.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return Some(PathBuf::from(format!("{drive}:/")));
     }
-
-    let mut out = PathBuf::from(format!("{drive}:\\"));
-    for segment in tail.split('/').filter(|segment| !segment.is_empty()) {
-        out.push(segment);
-    }
-    Some(out)
+    // Use `/` so non-Windows hosts (CI) do not treat `D:\` as a single path component.
+    let joined = segments.join("/");
+    Some(PathBuf::from(format!("{drive}:/{joined}")))
 }
 
 fn resolve_path_candidate(path: &str) -> io::Result<PathBuf> {
