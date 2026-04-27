@@ -5979,18 +5979,23 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
     }
     let shell = detect_powershell_shell()?;
     execute_shell_command(
-        shell,
+        &shell,
         &input.command,
         input.timeout,
         input.run_in_background,
     )
 }
 
-fn detect_powershell_shell() -> std::io::Result<&'static str> {
+fn detect_powershell_shell() -> std::io::Result<String> {
+    #[cfg(test)]
+    if let Some(shell) = std::env::var_os("CLAW_TEST_POWERSHELL_SHELL") {
+        return Ok(shell.to_string_lossy().into_owned());
+    }
+
     if command_exists("pwsh") {
-        Ok("pwsh")
+        Ok("pwsh".to_string())
     } else if command_exists("powershell") {
-        Ok("powershell")
+        Ok("powershell".to_string())
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -9493,7 +9498,16 @@ mod tests {
         #[cfg(windows)]
         std::fs::write(
             &script,
-            "@echo off\r\nset args=%*\r\nset args=%args:* -Command =%\r\n<nul set /p =pwsh:%args%",
+            concat!(
+                "@echo off\r\n",
+                "set args=%*\r\n",
+                "set args=%args:* -Command =%\r\n",
+                "set args=%args:\"=%\r\n",
+                "<nul set /p =pwsh:%args%\r\n",
+                "if \"%args%\"==\"exit 9\" exit /b 9\r\n",
+                "ping 127.0.0.1 -n 2 >nul\r\n",
+                "exit /b 0\r\n",
+            ),
         )
         .expect("write script");
 
@@ -9528,6 +9542,7 @@ sleep 1
         std::env::set_var("PATH", format!("{};{}", dir.display(), original_path));
         #[cfg(not(windows))]
         std::env::set_var("PATH", format!("{}:{}", dir.display(), original_path));
+        std::env::set_var("CLAW_TEST_POWERSHELL_SHELL", script.as_os_str());
         #[cfg(windows)]
         std::env::set_var("PATHEXT", ".COM;.EXE;.BAT;.CMD");
 
@@ -9542,11 +9557,6 @@ sleep 1
             &json!({"command": "Write-Output hello", "run_in_background": true}),
         )
         .expect("PowerShell background should succeed");
-
-        std::env::set_var("PATH", original_path);
-        #[cfg(windows)]
-        std::env::set_var("PATHEXT", original_pathext);
-        let _ = std::fs::remove_dir_all(dir);
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert_eq!(output["stdout"], "pwsh:Write-Output hello");
@@ -9568,6 +9578,13 @@ sleep 1
         .expect("PowerShell should report immediate background exit");
         let immediate_exit_output: serde_json::Value =
             serde_json::from_str(&immediate_exit).expect("json");
+
+        std::env::set_var("PATH", original_path);
+        std::env::remove_var("CLAW_TEST_POWERSHELL_SHELL");
+        #[cfg(windows)]
+        std::env::set_var("PATHEXT", original_pathext);
+        let _ = std::fs::remove_dir_all(dir);
+
         assert!(immediate_exit_output["backgroundTaskId"].is_null());
         assert_eq!(
             immediate_exit_output["returnCodeInterpretation"],
