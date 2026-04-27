@@ -28,7 +28,7 @@ const DEFAULT_MAX_RETRIES: u32 = 8;
 /// Providers that hit output-token limits without sending [DONE] will stall
 /// the connection indefinitely; this timeout surfaces that as an error instead
 /// of blocking the process forever.
-const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompatConfig {
@@ -332,8 +332,9 @@ fn jitter_for_base(base: Duration) -> Duration {
     }
     let raw_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        });
     let tick = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut mixed = raw_nanos
         .wrapping_add(tick)
@@ -1343,7 +1344,7 @@ pub fn read_openai_api_key() -> Option<String> {
 }
 
 /// Read `OPENAI_BASE_URL` when explicitly set (environment or `.env`); does not substitute the
-/// default OpenAI API host.
+/// default `OpenAI` API host.
 #[must_use]
 pub fn read_openai_base_url_explicit() -> Option<String> {
     read_env_non_empty("OPENAI_BASE_URL").ok().flatten()

@@ -25,6 +25,9 @@ const BACKGROUND_LAUNCH_POLL_MS: u64 = 25;
 
 static BACKGROUND_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
 
+#[cfg(windows)]
+static WSL_DRIVE_PATH_RE: OnceLock<Regex> = OnceLock::new();
+
 fn background_pids() -> &'static Mutex<Vec<u32>> {
     BACKGROUND_PIDS.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -286,9 +289,8 @@ fn rewrite_command_for_shell<'a>(command: &'a str, shell_program: &str) -> Cow<'
         if shell_program != "wsl" {
             return Cow::Borrowed(command);
         }
-        static RE: OnceLock<Regex> = OnceLock::new();
         // Do not use ':' as a boundary — it would rewrite `http://d/foo` incorrectly.
-        let re = RE.get_or_init(|| {
+        let re = WSL_DRIVE_PATH_RE.get_or_init(|| {
             Regex::new(r#"(?P<b>^|[\s;='"`\(\[])/(?P<l>[a-zA-Z])/"#).expect("valid regex")
         });
         let mut out = String::new();
@@ -332,7 +334,7 @@ fn try_preflight_bash_command(
     ];
     let token = first_shell_command_token(command)?;
     let lower = token.to_ascii_lowercase();
-    if !PREFLIGHT_TOKENS.iter().any(|t| *t == lower.as_str()) {
+    if !PREFLIGHT_TOKENS.contains(&lower.as_str()) {
         return None;
     }
     if !lower
@@ -369,8 +371,7 @@ fn bash_command_exists(cmd: &str) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn first_shell_command_token(command: &str) -> Option<String> {
@@ -505,13 +506,12 @@ fn detect_host_shell() -> (&'static str, &'static [&'static str]) {
 fn command_exists(command: &str) -> bool {
     #[cfg(windows)]
     {
-        return Command::new("where")
+        Command::new("where")
             .arg(command)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .is_ok_and(|status| status.success())
     }
 
     #[cfg(not(windows))]
@@ -522,8 +522,7 @@ fn command_exists(command: &str) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .is_ok_and(|status| status.success())
     }
 }
 

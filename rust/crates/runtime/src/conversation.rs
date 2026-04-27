@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -351,7 +351,7 @@ where
         if self.resolved_completion_verify_command().is_none() {
             return false;
         }
-        !(cfg.skip_if_no_tools && !had_tool_results)
+        !cfg.skip_if_no_tools || had_tool_results
     }
 
     fn maybe_log_completion_verify_skipped(&self) {
@@ -390,8 +390,7 @@ where
         })
         .map_err(|e| {
             format!(
-                "[Engine completion verification failed — could not run the verify command.]\n\n{}",
-                e
+                "[Engine completion verification failed — could not run the verify command.]\n\n{e}"
             )
         })?;
         if completion_verify_output_ok(&output) {
@@ -406,7 +405,8 @@ where
         let Some(ctx) = self.model_context_window else {
             return configured;
         };
-        let cap = ((u64::from(ctx)).saturating_mul(60).saturating_div(100)).max(10_000) as u32;
+        let raw = ((u64::from(ctx)).saturating_mul(60).saturating_div(100)).max(10_000);
+        let cap = u32::try_from(raw).unwrap_or(u32::MAX);
         configured.min(cap)
     }
 
@@ -537,7 +537,8 @@ where
                             continue;
                         }
                     }
-                } else {
+                }
+                if !self.completion_verify_should_run(!tool_results.is_empty()) {
                     self.maybe_log_completion_verify_skipped();
                     break;
                 }
@@ -999,7 +1000,7 @@ fn format_completion_verify_feedback(command: &str, output: &BashCommandOutput) 
         body.push_str("\n\n(Verify command timed out.)\n");
     }
     if let Some(code) = &output.return_code_interpretation {
-        body.push_str(&format!("\n({code})\n"));
+        let _ = write!(body, "\n({code})\n");
     }
     if body.len() > MAX_COMPLETION_VERIFY_FEEDBACK {
         body.truncate(MAX_COMPLETION_VERIFY_FEEDBACK);

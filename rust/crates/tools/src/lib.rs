@@ -1994,8 +1994,7 @@ fn git_ref_exists(reference: &str) -> bool {
     Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", reference])
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success())
 }
 
 fn git_stdout(args: &[&str]) -> Option<String> {
@@ -2251,7 +2250,12 @@ struct ReadFileInput {
 #[derive(Debug, Deserialize)]
 struct WriteFileInput {
     /// Some models emit `file_path` / `filePath` / `target` instead of `path`.
-    #[serde(alias = "file_path", alias = "filePath", alias = "target", alias = "target_path")]
+    #[serde(
+        alias = "file_path",
+        alias = "filePath",
+        alias = "target",
+        alias = "target_path"
+    )]
     path: String,
     #[serde(alias = "body", alias = "text")]
     content: String,
@@ -5998,13 +6002,12 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 fn command_exists(command: &str) -> bool {
     #[cfg(windows)]
     {
-        return std::process::Command::new("where")
+        std::process::Command::new("where")
             .arg(command)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .is_ok_and(|status| status.success())
     }
 
     #[cfg(not(windows))]
@@ -6015,8 +6018,7 @@ fn command_exists(command: &str) -> bool {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .is_ok_and(|status| status.success())
     }
 }
 

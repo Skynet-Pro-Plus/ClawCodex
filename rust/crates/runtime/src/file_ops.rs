@@ -519,9 +519,9 @@ fn apply_limit<T>(
 /// native file tools resolve to the same files as Explorer.
 #[cfg(windows)]
 fn wsl_mnt_drive_path_to_windows(path: &str) -> Option<PathBuf> {
+    const PREFIX: &str = "/mnt/";
     let path = path.trim_start_matches('\u{feff}');
     let lower = path.to_ascii_lowercase();
-    const PREFIX: &str = "/mnt/";
     if !lower.starts_with(PREFIX) {
         return None;
     }
@@ -574,9 +574,7 @@ fn repair_windows_double_drive_segment(path: &str) -> Option<PathBuf> {
     if after_prefix.is_empty() {
         return None;
     }
-    let seg_end = after_prefix
-        .find('\\')
-        .unwrap_or_else(|| after_prefix.len());
+    let seg_end = after_prefix.find('\\').unwrap_or(after_prefix.len());
     let first = &after_prefix[..seg_end];
     if first.len() != 1 {
         return None;
