@@ -9499,12 +9499,19 @@ mod tests {
 
         #[cfg(not(windows))]
         {
+            // `verify_background_shell_launch` treats an exit inside ~750ms as failure; keep the
+            // stub alive except for the `exit 9` immediate-background case.
             std::fs::write(
                 &script,
                 r#"#!/bin/sh
 while [ "$1" != "-Command" ] && [ $# -gt 0 ]; do shift; done
 shift
-printf 'pwsh:%s' "$1"
+cmd="$1"
+printf 'pwsh:%s' "$cmd"
+if [ "$cmd" = "exit 9" ]; then
+  exit 9
+fi
+sleep 1
 "#,
             )
             .expect("write script");
