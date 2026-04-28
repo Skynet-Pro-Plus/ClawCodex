@@ -205,15 +205,87 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ## Tool Surface
 
-ClawCodex is more than a shell/file-editing wrapper. The current Rust tool surface includes:
+ClawCodex is more than a shell/file-editing wrapper. The upgraded engine exposes the original workspace tools plus a broader tool-call surface for planning, research, notebook editing, structured output, agent orchestration, workers, teams, cron jobs, and MCP integrations.
 
-- Baseline workspace tools: shell, read, write, edit, glob, and grep.
-- Windows and runtime tools: PowerShell, REPL execution, notebook editing, and sleep.
-- Workflow tools: todo tracking, plan mode, structured output, config inspection, and explicit user questions.
-- Research and discovery tools: web fetch, web search, tool search, skills, MCP resources, and MCP tool calls.
-- Orchestration tools: agents, tasks, workers, teams, cron jobs, and recovery/observability helpers.
+The source of truth is [`rust/crates/tools/src/lib.rs`](./rust/crates/tools/src/lib.rs), with runtime and audit coverage in [`rust/crates/tools/src/bin/tool_audit.rs`](./rust/crates/tools/src/bin/tool_audit.rs).
 
-The source of truth is [`rust/crates/tools/src/lib.rs`](./rust/crates/tools/src/lib.rs). Detailed usage belongs in [`USAGE.md`](./USAGE.md) and the Rust workspace docs rather than on this landing page.
+### Original workspace tools
+
+These are the baseline tools most people expect from a coding agent:
+
+- `bash` - run shell commands in the workspace.
+- `read_file` - read file contents.
+- `write_file` - write file contents.
+- `edit_file` - replace text inside files.
+- `glob_search` - find files by glob pattern.
+- `grep_search` - search file contents by pattern.
+
+### Added shell and editing tools
+
+- `PowerShell` - run Windows-native PowerShell commands.
+- `REPL` - execute code in a supported language runtime.
+- `NotebookEdit` - modify Jupyter notebook cell contents.
+
+### Added research and discovery tools
+
+- `WebFetch` - fetch a URL and answer a prompt about it.
+- `WebSearch` - search the web for current information.
+- `ToolSearch` - search the available tool registry.
+
+### Added planning and workflow tools
+
+- `TodoWrite` - maintain a structured todo/task list.
+- `Skill` - invoke installed skills.
+- `Config` - inspect config state.
+- `Sleep` - pause briefly during workflows.
+- `SendUserMessage` - send an explicit user-facing progress/update message.
+- `StructuredOutput` - emit structured or machine-readable output.
+- `EnterPlanMode` - switch into plan mode.
+- `ExitPlanMode` - leave plan mode.
+- `AskUserQuestion` - ask a structured question through the runtime.
+
+### Added task and agent orchestration tools
+
+- `Agent` - create or invoke an agent workflow.
+- `TaskCreate` - create a tracked task.
+- `RunTaskPacket` - create a task from a structured task packet.
+- `TaskGet` - inspect one task.
+- `TaskList` - list tracked tasks.
+- `TaskStop` - stop a task.
+- `TaskUpdate` - update task status or metadata.
+- `TaskOutput` - retrieve task output.
+
+### Added worker lifecycle tools
+
+- `WorkerCreate` - create a worker/session process.
+- `WorkerGet` - inspect worker state.
+- `WorkerObserve` - attach observation data to worker state.
+- `WorkerResolveTrust` - resolve workspace trust status for a worker.
+- `WorkerAwaitReady` - wait for a worker to become ready.
+- `WorkerSendPrompt` - send a prompt to a worker.
+- `WorkerRestart` - restart a worker.
+- `WorkerObserveCompletion` - record worker completion state.
+- `WorkerTerminate` - terminate a worker.
+
+### Added team and scheduling tools
+
+- `TeamCreate` - create a team grouping for coordinated work.
+- `TeamDelete` - remove a team grouping.
+- `CronCreate` - create a cron/scheduled job.
+- `CronList` - list scheduled jobs.
+- `CronDelete` - delete a scheduled job.
+
+### Added integration and protocol tools
+
+- `LSP` - interact with language-server-backed features.
+- `ListMcpResources` - list resources exposed by an MCP server.
+- `ReadMcpResource` - read a specific MCP resource.
+- `McpAuth` - inspect or handle MCP auth state.
+- `MCP` - invoke MCP-exposed tools.
+- `RemoteTrigger` - trigger a remote/integration action.
+- `TestingPermission` - exercise/testing hook for permission flows.
+
+Not every tool is available in every environment. Some depend on configured MCP servers, worker state, cron/team state, local runtimes, provider/network access, or permission mode. The main point is that the upgraded engine can handle more than direct file edits: it can plan, research, coordinate workers, manage tasks, inspect runtime state, and integrate with external tool protocols.
 
 ## Documentation Map
 
