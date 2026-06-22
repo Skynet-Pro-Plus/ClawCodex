@@ -15,7 +15,7 @@ commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
 pulldown-cmark = "0.13"
-rustyline = "15"
+rustyline = "18"
 runtime = { path = "../runtime" }
 plugins = { path = "../plugins" }
 serde = { version = "1", features = ["derive"] }
