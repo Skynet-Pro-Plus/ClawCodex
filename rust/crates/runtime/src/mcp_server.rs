@@ -21,9 +21,9 @@ use tokio::io::{
 };
 
 use crate::mcp_stdio::{
-    JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeResult,
-    McpInitializeServerInfo, McpListToolsResult, McpTool, McpToolCallContent, McpToolCallParams,
-    McpToolCallResult,
+    validate_mcp_content_length, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
+    McpInitializeResult, McpInitializeServerInfo, McpListToolsResult, McpTool, McpToolCallContent,
+    McpToolCallParams, McpToolCallResult,
 };
 
 /// Protocol version the server advertises during `initialize`.
@@ -168,12 +168,7 @@ impl McpServer {
                 version: self.spec.server_version.clone(),
             },
         };
-        JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: serde_json::to_value(result).ok(),
-            error: None,
-        }
+        jsonrpc_result_response(id, result)
     }
 
     fn handle_tools_list(&self, id: JsonRpcId) -> JsonRpcResponse<JsonValue> {
@@ -181,12 +176,7 @@ impl McpServer {
             tools: self.spec.tools.clone(),
             next_cursor: None,
         };
-        JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: serde_json::to_value(result).ok(),
-            error: None,
-        }
+        jsonrpc_result_response(id, result)
     }
 
     fn handle_tools_call(
@@ -220,12 +210,31 @@ impl McpServer {
             is_error: Some(is_error),
             meta: None,
         };
-        JsonRpcResponse {
+        jsonrpc_result_response(id, call_result)
+    }
+}
+
+fn jsonrpc_result_response<T: serde::Serialize>(
+    id: JsonRpcId,
+    result: T,
+) -> JsonRpcResponse<JsonValue> {
+    match serde_json::to_value(result) {
+        Ok(result) => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id,
-            result: serde_json::to_value(call_result).ok(),
+            result: Some(result),
             error: None,
-        }
+        },
+        Err(error) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32603,
+                message: format!("internal error serializing response: {error}"),
+                data: None,
+            }),
+        },
     }
 }
 
@@ -280,6 +289,7 @@ async fn read_frame(reader: &mut BufReader<Stdin>) -> io::Result<Option<Vec<u8>>
     let content_length = content_length.ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
     })?;
+    let content_length = validate_mcp_content_length(content_length)?;
     let mut payload = vec![0_u8; content_length];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))

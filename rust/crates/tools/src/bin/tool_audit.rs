@@ -27,6 +27,7 @@ struct ChildResult {
     error: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "invoke") {
@@ -53,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |result| match result {
             Ok(value) if output_contains(&value, "stdout", "claw-bash-ok") => audit_pass(value),
             Ok(value) => audit_fail(value, "bash output missing expected marker"),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
     entries.push(run_tool(
@@ -72,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 value,
                 "read_file did not return expected launch.ps1 content",
             ),
-            Err(error) => audit_failed_error(error),
+            Err(error) => audit_failed_error(&error),
         },
     ));
     entries.push(run_tool(
@@ -85,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 value,
                 "write_file reported success but file was not created",
             ),
-            Err(error) => audit_failed_error(error),
+            Err(error) => audit_failed_error(&error),
         },
     ));
     entries.push(run_tool(
@@ -95,32 +96,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |result| match result {
             Ok(value) if fs::read_to_string(&write_path).ok().is_some_and(|text| text.contains("gamma")) => audit_pass(value),
             Ok(value) => audit_fail(value, "edit_file reported success but file content was unchanged"),
-            Err(error) => audit_failed_error(error),
+            Err(error) => audit_failed_error(&error),
         },
     ));
     entries.push(run_tool(
         "glob_search",
         "search",
         json!({"pattern": "*.py", "path": repo_root.display().to_string()}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "grep_search",
         "search",
         json!({"pattern": "def ", "path": repo_root.join("src").display().to_string()}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WebFetch",
         "web",
         json!({"url": "https://example.com", "prompt": "Return the title"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WebSearch",
         "web",
         json!({"query": "OpenAI official website"}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     let todo_store = audit_dir.join("todos.json");
@@ -132,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {"content": "Audit tools", "activeForm": "Auditing tools", "status": "in_progress"},
                 {"content": "Write report", "activeForm": "Writing report", "status": "pending"}
             ]}),
-            |result| any_ok(result),
+            any_ok,
         ));
     });
 
@@ -142,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"skill": "imagegen"}),
         |result| match result {
             Ok(value) => audit_pass(value),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
 
@@ -152,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"description": "tool-audit-agent", "prompt": "Write one line to the agent output and stop", "name": "tool-audit-agent"}),
         |result| match result {
             Ok(value) => classify_agent_result(value),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
 
@@ -160,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ToolSearch",
         "workflow",
         json!({"query": "bash", "max_results": 5}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     fs::write(
@@ -171,19 +172,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "NotebookEdit",
         "file",
         json!({"notebook_path": notebook_path.display().to_string(), "cell_id": "cell-a", "new_source": "print(2)\n", "edit_mode": "replace"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "Sleep",
         "workflow",
         json!({"duration_ms": 10}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "SendUserMessage",
         "workflow",
         json!({"message": "tool audit", "status": "normal"}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     let config_root = tmp_dir.join("config-home");
@@ -199,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Config",
             "config",
             json!({"setting": "verbose"}),
-            |result| any_ok(result),
+            any_ok,
         ));
         entries.push(run_tool("EnterPlanMode", "config", json!({}), |result| {
             any_ok(result)
@@ -213,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "StructuredOutput",
         "workflow",
         json!({"ok": true, "items": [1, 2, 3]}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "REPL",
@@ -228,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Python runtime is not available from this Windows environment",
                 )),
             ),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
     entries.push(run_tool(
@@ -240,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 audit_pass(value)
             }
             Ok(value) => audit_fail(value, "PowerShell output missing expected marker"),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
 
@@ -253,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("1\n"),
         |result| match result {
             Ok(value) => any_ok(Ok(value)),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
 
@@ -284,13 +285,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "reporting_contract": "write findings",
             "escalation_policy": "stop on destructive ambiguity"
         }),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "TaskGet",
         "tasking",
         json!({"task_id": task_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool("TaskList", "tasking", json!({}), |result| {
         any_ok(result)
@@ -299,19 +300,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "TaskUpdate",
         "tasking",
         json!({"task_id": task_id, "message": "updated by tool audit"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "TaskOutput",
         "tasking",
         json!({"task_id": task_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "TaskStop",
         "tasking",
         json!({"task_id": task_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     let mut worker_id = String::new();
@@ -332,13 +333,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "WorkerGet",
         "worker",
         json!({"worker_id": worker_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WorkerObserve",
         "worker",
         json!({"worker_id": worker_id, "screen_text": "Do you trust the files in this folder?"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WorkerResolveTrust",
@@ -346,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"worker_id": worker_id}),
         |result| match result {
             Ok(value) => any_ok(Ok(value)),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
     execute_tool(
@@ -360,32 +361,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"worker_id": worker_id}),
         |result| match result {
             Ok(value) => any_ok(Ok(value)),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
     entries.push(run_tool(
         "WorkerSendPrompt",
         "worker",
         json!({"worker_id": worker_id, "prompt": "Hello worker"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WorkerRestart",
         "worker",
         json!({"worker_id": worker_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WorkerObserveCompletion",
         "worker",
         json!({"worker_id": worker_id, "finish_reason": "completed", "tokens_output": 1}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "WorkerTerminate",
         "worker",
         json!({"worker_id": worker_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     let mut team_id = String::new();
@@ -404,7 +405,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "TeamDelete",
         "team",
         json!({"team_id": team_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     let mut cron_id = String::new();
@@ -426,7 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CronDelete",
         "cron",
         json!({"cron_id": cron_id}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     entries.push(run_tool(
@@ -442,7 +443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )),
             ),
             Ok(value) => audit_pass(value),
-            Err(error) => blocked_or_failed(error),
+            Err(error) => blocked_or_failed(&error),
         },
     ));
     entries.push(run_tool(
@@ -467,7 +468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "RemoteTrigger",
         "integration",
         json!({"url": "https://example.com", "method": "GET"}),
-        |result| any_ok(result),
+        any_ok,
     ));
     entries.push(run_tool(
         "MCP",
@@ -479,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "TestingPermission",
         "integration",
         json!({"action": "audit"}),
-        |result| any_ok(result),
+        any_ok,
     ));
 
     for entry in &entries {
@@ -492,7 +493,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string(&entry.evidence).unwrap_or_else(|_| String::from("{}"))
             ));
             if let Some(cause) = &entry.likely_cause {
-                bug_lines.push(format!("- Likely cause: {}", cause));
+                bug_lines.push(format!("- Likely cause: {cause}"));
             }
             bug_lines.push(String::new());
         }
@@ -702,7 +703,7 @@ fn classify_agent_result(value: Value) -> (String, Value, Option<String>) {
 fn any_ok(result: Result<Value, String>) -> (String, Value, Option<String>) {
     match result {
         Ok(value) => audit_pass(value),
-        Err(error) => blocked_or_failed(error),
+        Err(error) => blocked_or_failed(&error),
     }
 }
 
@@ -717,7 +718,7 @@ fn classify_mcp_result(
             Some(blocked_reason.to_string()),
         ),
         Ok(value) => audit_pass(value),
-        Err(error) => blocked_or_failed(error),
+        Err(error) => blocked_or_failed(&error),
     }
 }
 
@@ -732,7 +733,7 @@ fn classify_disconnected_result(
             Some(blocked_reason.to_string()),
         ),
         Ok(value) => audit_pass(value),
-        Err(error) => blocked_or_failed(error),
+        Err(error) => blocked_or_failed(&error),
     }
 }
 
@@ -744,7 +745,7 @@ fn audit_fail(value: Value, cause: &str) -> (String, Value, Option<String>) {
     (String::from("failed"), value, Some(cause.to_string()))
 }
 
-fn audit_failed_error(error: String) -> (String, Value, Option<String>) {
+fn audit_failed_error(error: &str) -> (String, Value, Option<String>) {
     (
         String::from("failed"),
         json!({ "error": error }),
@@ -752,7 +753,7 @@ fn audit_failed_error(error: String) -> (String, Value, Option<String>) {
     )
 }
 
-fn blocked_or_failed(error: String) -> (String, Value, Option<String>) {
+fn blocked_or_failed(error: &str) -> (String, Value, Option<String>) {
     let lower = error.to_lowercase();
     let blocked = [
         "unknown skill",
@@ -817,7 +818,7 @@ fn render_report(entries: &[AuditEntry]) -> String {
             serde_json::to_string(&entry.evidence).unwrap_or_else(|_| String::from("{}"))
         ));
         if let Some(cause) = &entry.likely_cause {
-            lines.push(format!("- Likely cause: {}", cause));
+            lines.push(format!("- Likely cause: {cause}"));
         }
         lines.push(String::new());
     }

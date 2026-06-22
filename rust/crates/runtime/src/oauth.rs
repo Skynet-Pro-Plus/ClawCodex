@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -326,7 +326,7 @@ pub fn parse_oauth_callback_query(query: &str) -> Result<OAuthCallbackParams, St
 
 fn generate_random_token(bytes: usize) -> io::Result<String> {
     let mut buffer = vec![0_u8; bytes];
-    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    getrandom::fill(&mut buffer).map_err(|error| io::Error::other(error.to_string()))?;
     Ok(base64url_encode(&buffer))
 }
 
@@ -376,7 +376,49 @@ fn write_credentials_root(path: &PathBuf, root: &Map<String, Value>) -> io::Resu
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let temp_path = path.with_extension("json.tmp");
     fs::write(&temp_path, format!("{rendered}\n"))?;
-    fs::rename(temp_path, path)
+    fs::rename(temp_path, path)?;
+    protect_local_credential_file(path);
+    Ok(())
+}
+
+fn protect_local_credential_file(path: &PathBuf) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(metadata) = fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let Some(user) = windows_account_name() else {
+            return;
+        };
+        let user_grant = format!("{user}:F");
+        let _ = std::process::Command::new("icacls")
+            .arg(path)
+            .args([
+                "/inheritance:r",
+                "/grant:r",
+                &user_grant,
+                "/grant:r",
+                "SYSTEM:F",
+            ])
+            .status();
+    }
+}
+
+#[cfg(windows)]
+fn windows_account_name() -> Option<String> {
+    let username = std::env::var("USERNAME").ok()?;
+    match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.trim().is_empty() => Some(format!("{domain}\\{username}")),
+        _ => Some(username),
+    }
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {

@@ -1,4 +1,4 @@
-//! First-run OpenRouter setup: prompt once, write repo-root `.env`, set process env.
+//! First-run `OpenRouter` setup: prompt once, write repo-root `.env`, set process env.
 //!
 //! Skipped when `CLAW_NO_CREDENTIAL_PROMPT=1`, JSON doctor output, or credentials are already usable.
 //! `doctor` uses [`ensure_openrouter_credentials_for_doctor`] (no model-metadata gate) so setup
@@ -8,6 +8,7 @@
 //! succeeds (so saving from `rust/` still lands next to `README.md`).
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,21 @@ fn openrouter_credentials_usable() -> bool {
     read_openai_base_url_explicit()
         .as_deref()
         .is_some_and(|value| value.to_lowercase().contains("openrouter"))
+}
+
+/// Non-OpenRouter OpenAI-compatible endpoints (Cerebras, local servers, etc.) with a real key.
+fn non_openrouter_openai_compat_credentials_usable() -> bool {
+    let Some(base) = read_openai_base_url_explicit() else {
+        return false;
+    };
+    if base.to_lowercase().contains("openrouter") {
+        return false;
+    }
+    read_openai_api_key().is_some_and(|key| !looks_like_placeholder_api_key(&key))
+}
+
+fn provider_credentials_usable() -> bool {
+    openrouter_credentials_usable() || non_openrouter_openai_compat_credentials_usable()
 }
 
 fn model_uses_openai_api_key_env(model: &str) -> bool {
@@ -93,8 +109,8 @@ fn write_repo_dotenv(root: &Path, api_key: &str) -> io::Result<()> {
     if !out.is_empty() {
         out.push('\n');
     }
-    out.push_str(&format!("OPENAI_BASE_URL={OPENROUTER_BASE}\n"));
-    out.push_str(&format!("OPENAI_API_KEY={api_key}\n"));
+    writeln!(out, "OPENAI_BASE_URL={OPENROUTER_BASE}").expect("write to string");
+    writeln!(out, "OPENAI_API_KEY={api_key}").expect("write to string");
     fs::write(&path, &out)?;
     #[cfg(unix)]
     {
@@ -103,7 +119,42 @@ fn write_repo_dotenv(root: &Path, api_key: &str) -> io::Result<()> {
         perms.set_mode(0o600);
         fs::set_permissions(&path, perms)?;
     }
+    protect_local_credential_file(&path);
     Ok(())
+}
+
+fn protect_local_credential_file(path: &Path) {
+    #[cfg(windows)]
+    {
+        let Some(user) = windows_account_name() else {
+            return;
+        };
+        let user_grant = format!("{user}:F");
+        let _ = Command::new("icacls")
+            .arg(path)
+            .args([
+                "/inheritance:r",
+                "/grant:r",
+                &user_grant,
+                "/grant:r",
+                "SYSTEM:F",
+            ])
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(windows)]
+fn windows_account_name() -> Option<String> {
+    let username = env::var("USERNAME").ok()?;
+    match env::var("USERDOMAIN") {
+        Ok(domain) if !domain.trim().is_empty() => Some(format!("{domain}\\{username}")),
+        _ => Some(username),
+    }
 }
 
 fn read_api_key_interactive() -> Result<String, Box<dyn std::error::Error>> {
@@ -111,25 +162,63 @@ fn read_api_key_interactive() -> Result<String, Box<dyn std::error::Error>> {
     eprintln!();
     eprintln!("------------------------------------------------------------------");
     eprintln!("  Paste your OpenRouter API key below and press Enter.");
+    eprintln!("  Input is hidden when the terminal supports it.");
     eprintln!("  (No pop-up window — type in this same console.)");
     eprintln!("  It will be saved to .env in the repo root.");
     eprintln!("------------------------------------------------------------------");
     eprintln!();
     eprint!("OpenRouter API key: ");
     io::stderr().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let trimmed = line.trim().to_string();
+    let trimmed = read_hidden_line()?.trim().to_string();
     if trimmed.is_empty() {
         return Err("no API key entered".into());
     }
     Ok(trimmed)
 }
 
+fn read_hidden_line() -> io::Result<String> {
+    #[cfg(windows)]
+    {
+        let script = r"
+$secure = Read-Host -AsSecureString
+if ($null -eq $secure) { exit 1 }
+$bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+    [Console]::Out.Write([System.Runtime.InteropServices.Marshal]::PtrToStringUni($bstr))
+} finally {
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+}
+";
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .output()?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+        Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok(line)
+    }
+}
+
 fn try_interactive_openrouter_save(
     allow_interactive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if openrouter_credentials_usable() {
+    if provider_credentials_usable() {
         return Ok(());
     }
     if !allow_interactive {
@@ -165,14 +254,14 @@ fn try_interactive_openrouter_save(
     Ok(())
 }
 
-/// `claw doctor` entrypoint: always offer OpenRouter setup when creds are missing (no model gate).
+/// `claw doctor` entrypoint: always offer `OpenRouter` setup when creds are missing (no model gate).
 pub fn ensure_openrouter_credentials_for_doctor(
     allow_interactive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     try_interactive_openrouter_save(allow_interactive)
 }
 
-/// REPL / `prompt`: only when the resolved model uses `OPENAI_API_KEY` (OpenRouter/OpenAI-compat path).
+/// REPL / `prompt`: only when the resolved model uses `OPENAI_API_KEY` (`OpenRouter`/OpenAI-compat path).
 pub fn ensure_openrouter_credentials_if_needed(
     model: &str,
     allow_interactive: bool,

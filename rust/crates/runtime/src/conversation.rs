@@ -16,12 +16,16 @@ use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
 use crate::sandbox::FilesystemIsolationMode;
-use crate::session::{ContentBlock, ConversationMessage, Session};
+use crate::session::{ContentBlock, ConversationMessage, Session, SessionTaskLedgerUpdate};
 use crate::tool_output::{tool_result_truncation_limit, truncate_tool_output};
 use crate::usage::{TokenUsage, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
+/// Identical consecutive tool failures before corrective feedback is injected.
+const IDENTICAL_TOOL_FAILURE_NUDGE: u32 = 3;
+/// Identical consecutive tool failures before the turn is aborted outright.
+const IDENTICAL_TOOL_FAILURE_ABORT: u32 = 6;
 
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +465,8 @@ where
         }
 
         self.record_turn_started(&user_input);
+        let mutation_requested = user_requests_filesystem_execution(&user_input)
+            || session_has_pending_filesystem_execution(&self.session);
         self.session
             .push_user_text(user_input)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -469,6 +475,12 @@ where
         let mut tool_results = Vec::new();
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
+        let mut evidence_nudges = 0_u8;
+        // Circuit breaker for repeated identical tool failures: weaker models
+        // retry the same malformed call indefinitely. Nudge with corrective
+        // feedback after IDENTICAL_TOOL_FAILURE_NUDGE, abort the turn after
+        // IDENTICAL_TOOL_FAILURE_ABORT instead of grinding to max_iterations.
+        let mut failure_streak: Option<(String, String, u32)> = None;
 
         loop {
             iterations += 1;
@@ -493,7 +505,7 @@ where
                     return Err(error);
                 }
             };
-            let (assistant_message, usage, turn_prompt_cache_events) =
+            let (mut assistant_message, usage, turn_prompt_cache_events) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
                     Err(error) => {
@@ -501,6 +513,18 @@ where
                         return Err(error);
                     }
                 };
+            let recovered_compat_tool = recover_compat_text_tool_call(
+                &mut assistant_message,
+                self.session.model.as_deref(),
+                iterations,
+            );
+            let malformed_compat_tool = !recovered_compat_tool
+                && looks_like_malformed_compat_tool_call(
+                    &assistant_message,
+                    self.session.model.as_deref(),
+                );
+            let unsupported_mutation_completion =
+                mutation_requested && !tool_results.iter().any(tool_result_succeeded);
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
@@ -527,6 +551,25 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
+                if malformed_compat_tool || unsupported_mutation_completion {
+                    evidence_nudges = evidence_nudges.saturating_add(1);
+                    if evidence_nudges > 2 {
+                        let error = RuntimeError::new(
+                            "model repeatedly claimed or attempted filesystem work without a valid tool call",
+                        );
+                        self.record_turn_failed(iterations, &error);
+                        return Err(error);
+                    }
+                    let feedback = if malformed_compat_tool {
+                        "Your previous response looked like a tool request but was not valid. Emit a native tool call, or emit exactly one JSON object shaped as {\"tool\":\"tool_name\",\"arguments\":{...}} with no prose. Do not claim success until the tool result confirms it."
+                    } else {
+                        "No filesystem tool succeeded in this turn, so the claimed change has no execution evidence. Use the appropriate tool now and do not report success until its result confirms the change."
+                    };
+                    self.session
+                        .push_user_text(feedback)
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                    continue;
+                }
                 if self.completion_verify_should_run(!tool_results.is_empty()) {
                     match self.run_completion_verify() {
                         Ok(()) => break,
@@ -594,11 +637,28 @@ where
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);
-                        let (mut output, mut is_error) =
-                            match self.tool_executor.execute(&tool_name, &effective_input) {
+                        let (mut output, mut is_error) = match tool_name.as_str() {
+                            "TaskLedgerRead" => (
+                                serde_json::to_string_pretty(&self.session.task_ledger())
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?,
+                                false,
+                            ),
+                            "TaskLedgerUpdate" => {
+                                let update = parse_task_ledger_update(&effective_input)?;
+                                match self.session.update_task_ledger(update) {
+                                    Ok(()) => (
+                                        serde_json::to_string_pretty(&self.session.task_ledger())
+                                            .map_err(|error| RuntimeError::new(error.to_string()))?,
+                                        false,
+                                    ),
+                                    Err(error) => (error.to_string(), true),
+                                }
+                            }
+                            _ => match self.tool_executor.execute(&tool_name, &effective_input) {
                                 Ok(output) => (output, false),
                                 Err(error) => (error.to_string(), true),
-                            };
+                            },
+                        };
                         output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -635,19 +695,55 @@ where
                             }
                         }
 
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                        ConversationMessage::tool_result(tool_use_id, &tool_name, output, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
                         tool_use_id,
-                        tool_name,
+                        &tool_name,
                         merge_hook_feedback(pre_hook_result.messages(), reason, true),
                         true,
                     ),
                 };
+                self.record_ledger_from_tool(&tool_name, &effective_input, &result_message)?;
                 self.session
                     .push_message(result_message.clone())
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                 self.record_tool_finished(iterations, &result_message);
+                match tool_failure_signature(&result_message) {
+                    Some((name, signature)) => {
+                        let count = match failure_streak.take() {
+                            Some((prev_name, prev_sig, prev_count))
+                                if prev_name == name && prev_sig == signature =>
+                            {
+                                prev_count + 1
+                            }
+                            _ => 1,
+                        };
+                        if count >= IDENTICAL_TOOL_FAILURE_ABORT {
+                            let error = RuntimeError::new(format!(
+                                "tool `{name}` failed {count} times in a row with the same \
+                                 error — aborting the turn instead of looping. Last error: \
+                                 {signature}"
+                            ));
+                            self.record_turn_failed(iterations, &error);
+                            return Err(error);
+                        }
+                        if count == IDENTICAL_TOOL_FAILURE_NUDGE {
+                            self.session
+                                .push_user_text(format!(
+                                    "[loop-guard] The `{name}` call has failed {count} times in \
+                                     a row with the same error. Do not repeat the call \
+                                     unchanged. Re-read the error message, then fix the \
+                                     parameters, switch tools (write_file/edit_file for file \
+                                     content rather than shell heredocs), or tell the user why \
+                                     the task cannot proceed."
+                                ))
+                                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                        }
+                        failure_streak = Some((name, signature, count));
+                    }
+                    None => failure_streak = None,
+                }
                 tool_results.push(result_message);
             }
         }
@@ -693,6 +789,42 @@ where
 
     pub fn session_mut(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    fn record_ledger_from_tool(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        result_message: &ConversationMessage,
+    ) -> Result<(), RuntimeError> {
+        let Some(ContentBlock::ToolResult {
+            output, is_error, ..
+        }) = result_message.blocks.first()
+        else {
+            return Ok(());
+        };
+        if *is_error {
+            return Ok(());
+        }
+
+        match tool_name {
+            "write_file" | "edit_file" => {
+                if let Some(path) = extract_path_from_tool_payload(output) {
+                    self.session
+                        .record_changed_path(path)
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                }
+            }
+            "bash" => {
+                if should_record_verification_command(input) {
+                    self.session
+                        .record_verification(input)
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -905,6 +1037,210 @@ fn build_assistant_message(
     ))
 }
 
+/// Some OpenAI-compatible reasoning models emit a tool request as the entire
+/// assistant text instead of populating the protocol's `tool_calls` field.
+/// Recover only the narrow, explicit envelope used by those models and only
+/// for known affected model families. Permission checks still run normally.
+fn recover_compat_text_tool_call(
+    message: &mut ConversationMessage,
+    model: Option<&str>,
+    iteration: usize,
+) -> bool {
+    let model = model.unwrap_or_default().to_ascii_lowercase();
+    if !model.contains("gpt-oss") && !model.contains("glm") {
+        return false;
+    }
+    let [ContentBlock::Text { text }] = message.blocks.as_slice() else {
+        return false;
+    };
+    let json_text = exact_compat_tool_json(text);
+    let Ok(value) = serde_json::from_str::<Value>(json_text) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let (name, arguments) = if object.get("type").and_then(Value::as_str) == Some("tool") {
+        (
+            object.get("name").and_then(Value::as_str),
+            object.get("arguments"),
+        )
+    } else if object.get("type").and_then(Value::as_str) == Some("function") {
+        let function = object.get("function").and_then(Value::as_object);
+        (
+            function
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str),
+            function.and_then(|value| value.get("arguments")),
+        )
+    } else if object.len() == 2 {
+        (
+            object.get("tool").and_then(Value::as_str),
+            object.get("arguments"),
+        )
+    } else if object.len() == 1 {
+        object
+            .iter()
+            .next()
+            .map_or((None, None), |(name, arguments)| {
+                (Some(name.as_str()), Some(arguments))
+            })
+    } else {
+        (None, None)
+    };
+    let Some(name) = name else {
+        return false;
+    };
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return false;
+    }
+    let Some(arguments) = arguments.and_then(normalize_compat_tool_arguments) else {
+        return false;
+    };
+    message.blocks = vec![ContentBlock::ToolUse {
+        id: format!("compat_text_tool_{iteration}"),
+        name: name.to_string(),
+        input: arguments.to_string(),
+    }];
+    true
+}
+
+fn exact_compat_tool_json(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(fenced) = trimmed
+        .strip_prefix("```json")
+        .and_then(|value| value.strip_suffix("```"))
+    {
+        return fenced.trim();
+    }
+    if let Some(fenced) = trimmed
+        .strip_prefix("```")
+        .and_then(|value| value.strip_suffix("```"))
+    {
+        return fenced.trim();
+    }
+    trimmed
+}
+
+fn normalize_compat_tool_arguments(value: &Value) -> Option<Value> {
+    if value.is_object() {
+        return Some(value.clone());
+    }
+    value
+        .as_str()
+        .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
+        .filter(Value::is_object)
+}
+
+fn compat_text_model(model: Option<&str>) -> bool {
+    let model = model.unwrap_or_default().to_ascii_lowercase();
+    model.contains("gpt-oss") || model.contains("glm")
+}
+
+fn looks_like_malformed_compat_tool_call(
+    message: &ConversationMessage,
+    model: Option<&str>,
+) -> bool {
+    if !compat_text_model(model) {
+        return false;
+    }
+    let [ContentBlock::Text { text }] = message.blocks.as_slice() else {
+        return false;
+    };
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with("```")) {
+        return false;
+    }
+    trimmed.contains("\"tool\"")
+        || trimmed.contains("\"name\"")
+        || trimmed.contains("\"arguments\"")
+        || ["write_file", "edit_file", "bash", "PowerShell"]
+            .iter()
+            .any(|name| trimmed.contains(&format!("\"{name}\"")))
+}
+
+fn user_requests_filesystem_execution(input: &str) -> bool {
+    let lower = input.to_ascii_lowercase();
+    if [
+        "how do i ",
+        "how can i ",
+        "how to ",
+        "show me how",
+        "explain how",
+        "give me an example",
+    ]
+    .iter()
+    .any(|informational| lower.contains(informational))
+    {
+        return false;
+    }
+    [
+        "create ",
+        "make ",
+        "build ",
+        "write ",
+        "edit ",
+        "modify ",
+        "delete ",
+        "remove ",
+        "rename ",
+        "move ",
+        "copy ",
+        "generate ",
+        "save ",
+    ]
+    .iter()
+    .any(|verb| lower.contains(verb))
+}
+
+fn session_has_pending_filesystem_execution(session: &Session) -> bool {
+    let mut pending = false;
+    for message in &session.messages {
+        match message.role {
+            crate::session::MessageRole::User => {
+                if message.blocks.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text } if user_requests_filesystem_execution(text))
+                }) {
+                    pending = true;
+                }
+            }
+            crate::session::MessageRole::Tool => {
+                if message.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::ToolResult {
+                            tool_name,
+                            is_error: false,
+                            ..
+                        } if matches!(tool_name.as_str(), "write_file" | "edit_file" | "bash" | "PowerShell")
+                    )
+                }) {
+                    pending = false;
+                }
+            }
+            crate::session::MessageRole::System | crate::session::MessageRole::Assistant => {}
+        }
+    }
+    pending
+}
+
+fn tool_result_succeeded(message: &ConversationMessage) -> bool {
+    message.blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolResult {
+                is_error: false,
+                ..
+            }
+        )
+    })
+}
+
 fn flush_text_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
     if !text.is_empty() {
         blocks.push(ContentBlock::Text {
@@ -957,6 +1293,92 @@ fn dir_has_test_py(workspace: &Path) -> bool {
         let n = name.to_string_lossy();
         n.starts_with("test_") && n.ends_with(".py")
     })
+}
+
+/// Extract a (tool name, stable error signature) pair from a failed tool
+/// result so consecutive identical failures can be counted. Returns `None`
+/// for successful results. The signature is the first line of the error,
+/// capped, so byte-identical retries match while different errors reset.
+fn tool_failure_signature(message: &ConversationMessage) -> Option<(String, String)> {
+    message.blocks.iter().find_map(|block| match block {
+        ContentBlock::ToolResult {
+            tool_name,
+            output,
+            is_error,
+            ..
+        } if *is_error => {
+            let first_line = output.lines().next().unwrap_or_default();
+            let mut signature = first_line.chars().take(160).collect::<String>();
+            if signature.is_empty() {
+                signature = String::from("(empty error)");
+            }
+            Some((tool_name.clone(), signature))
+        }
+        _ => None,
+    })
+}
+
+fn extract_path_from_tool_payload(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    let object = value.as_object()?;
+    for key in ["path", "file_path", "filePath", "target_path", "targetPath"] {
+        if let Some(path) = object.get(key).and_then(Value::as_str) {
+            return Some(path.replace('\\', "/"));
+        }
+    }
+    None
+}
+
+fn should_record_verification_command(command: &str) -> bool {
+    let normalized = command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    normalized.contains("cargo test")
+        || normalized.contains("cargo clippy")
+        || normalized.contains("cargo check")
+        || normalized.contains("pytest")
+        || normalized.contains("npm test")
+        || normalized.contains("pnpm test")
+        || normalized.contains("yarn test")
+        || normalized.contains("go test")
+}
+
+fn parse_task_ledger_update(input: &str) -> Result<SessionTaskLedgerUpdate, RuntimeError> {
+    let value = serde_json::from_str::<Value>(input).map_err(|error| {
+        RuntimeError::new(format!("invalid TaskLedgerUpdate input JSON: {error}"))
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| RuntimeError::new("TaskLedgerUpdate input must be a JSON object"))?;
+    Ok(SessionTaskLedgerUpdate {
+        objective: object
+            .get("objective")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        constraints: json_string_array(object.get("constraints")),
+        decisions: json_string_array(object.get("decisions")),
+        relevant_paths: json_string_array(object.get("relevant_paths")),
+        changed_paths: json_string_array(object.get("changed_paths")),
+        verification: json_string_array(object.get("verification")),
+        next_steps: json_string_array(object.get("next_steps")),
+        repo_snapshot_id: object
+            .get("repo_snapshot_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
+fn json_string_array(value: Option<&Value>) -> Vec<String> {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn merge_hook_feedback(messages: &[String], output: String, is_error: bool) -> String {
@@ -1150,7 +1572,8 @@ mod completion_verify_unit_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_assistant_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
+        build_assistant_message, parse_auto_compaction_threshold, recover_compat_text_tool_call,
+        session_has_pending_filesystem_execution, tool_result_succeeded, ApiClient, ApiRequest,
         AssistantEvent, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
         StaticToolExecutor, ToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
@@ -1172,6 +1595,347 @@ mod tests {
 
     struct ScriptedApiClient {
         call_count: usize,
+    }
+
+    struct TextToolCompatApiClient {
+        call_count: usize,
+    }
+
+    struct GuardedCompatApiClient {
+        call_count: usize,
+        first_response: &'static str,
+    }
+
+    struct FailedThenClaimedApiClient {
+        call_count: usize,
+    }
+
+    impl ApiClient for TextToolCompatApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.call_count += 1;
+            let text = if self.call_count == 1 {
+                r#"{"tool":"write_file","arguments":{"path":"D:/Proj 1/index.html","content":"ok"}}"#
+            } else {
+                "The file was created."
+            };
+            Ok(vec![
+                AssistantEvent::TextDelta(text.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    impl ApiClient for GuardedCompatApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.call_count += 1;
+            let text = match self.call_count {
+                1 => self.first_response,
+                2 => r#"{"tool":"write_file","arguments":{"path":"pacman.html","content":"game"}}"#,
+                _ => "The verified file is ready.",
+            };
+            Ok(vec![
+                AssistantEvent::TextDelta(text.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    impl ApiClient for FailedThenClaimedApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.call_count += 1;
+            let text = match self.call_count {
+                1 | 3 => {
+                    r#"{"tool":"write_file","arguments":{"path":"pacman.html","content":"game"}}"#
+                }
+                2 => "The file has been created successfully.",
+                _ => "The file is now verified.",
+            };
+            Ok(vec![
+                AssistantEvent::TextDelta(text.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    #[test]
+    fn recovers_text_encoded_tool_call_for_affected_compat_model() {
+        let mut message = crate::session::ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: r#"{"type":"tool","name":"write_file","arguments":{"path":"D:/Proj 1/index.html","content":"ok"}}"#.to_string(),
+            },
+        ]);
+
+        assert!(recover_compat_text_tool_call(
+            &mut message,
+            Some("gpt-oss-120b"),
+            2
+        ));
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::ToolUse { id, name, input }
+                if id == "compat_text_tool_2"
+                    && name == "write_file"
+                    && input.contains("index.html")
+        ));
+    }
+
+    #[test]
+    fn recovers_cerebras_tool_arguments_envelope() {
+        let mut message =
+            crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text:
+                    r#"{"tool":"write_file","arguments":{"path":"pacman.html","content":"game"}}"#
+                        .to_string(),
+            }]);
+
+        assert!(recover_compat_text_tool_call(
+            &mut message,
+            Some("gpt-oss-120b"),
+            1
+        ));
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::ToolUse { name, input, .. }
+                if name == "write_file" && input.contains("pacman.html")
+        ));
+    }
+
+    #[test]
+    fn recovers_singleton_tool_name_envelope() {
+        let mut message =
+            crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: r#"{"write_file":{"path":"D:/Proj 1/index.html","content":"game"}}"#
+                    .to_string(),
+            }]);
+
+        assert!(recover_compat_text_tool_call(
+            &mut message,
+            Some("gpt-oss-120b"),
+            1
+        ));
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::ToolUse { name, input, .. }
+                if name == "write_file" && input.contains("D:/Proj 1/index.html")
+        ));
+    }
+
+    #[test]
+    fn recovers_fenced_and_string_encoded_compat_arguments() {
+        let mut message = crate::session::ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: "```json\n{\"tool\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"pacman.html\\\",\\\"content\\\":\\\"game\\\"}\"}\n```".to_string(),
+            },
+        ]);
+
+        assert!(recover_compat_text_tool_call(
+            &mut message,
+            Some("gpt-oss-120b"),
+            1
+        ));
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::ToolUse { name, input, .. }
+                if name == "write_file" && input.contains("pacman.html")
+        ));
+    }
+
+    #[test]
+    fn recovers_raw_openai_function_envelope() {
+        let mut message = crate::session::ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: r#"{"type":"function","function":{"name":"write_file","arguments":"{\"path\":\"pacman.html\",\"content\":\"game\"}"}}"#.to_string(),
+            },
+        ]);
+
+        assert!(recover_compat_text_tool_call(
+            &mut message,
+            Some("gpt-oss-120b"),
+            1
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_or_extra_field_compat_envelopes() {
+        for text in [
+            r#"{"tool":"write_file","arguments":{broken}"#,
+            r#"{"tool":"write_file","arguments":{"path":"x"},"claim":"done"}"#,
+            r#"{"tool":"write file","arguments":{"path":"x"}}"#,
+            r#"{"tool":"write_file","arguments":"not-json"}"#,
+        ] {
+            let mut message =
+                crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }]);
+            assert!(!recover_compat_text_tool_call(
+                &mut message,
+                Some("gpt-oss-120b"),
+                1
+            ));
+        }
+    }
+
+    #[test]
+    fn does_not_execute_text_tool_envelopes_from_unaffected_models_or_mixed_text() {
+        let text = r#"{"type":"tool","name":"bash","arguments":{"command":"echo hi"}}"#;
+        let mut unaffected =
+            crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: text.to_string(),
+            }]);
+        assert!(!recover_compat_text_tool_call(
+            &mut unaffected,
+            Some("claude-sonnet-4-6"),
+            1
+        ));
+
+        let mut mixed = crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: format!("Here is an example:\n{text}"),
+        }]);
+        assert!(!recover_compat_text_tool_call(
+            &mut mixed,
+            Some("gpt-oss-120b"),
+            1
+        ));
+    }
+
+    #[test]
+    fn compat_text_tool_call_executes_through_normal_permission_and_tool_loop() {
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_by_tool = observed.clone();
+        let executor = StaticToolExecutor::new().register("write_file", move |input| {
+            observed_by_tool
+                .lock()
+                .expect("observed input lock")
+                .push(input.to_string());
+            Ok("created".to_string())
+        });
+        let mut session = Session::new();
+        session.model = Some("gpt-oss-120b".to_string());
+        let mut runtime = ConversationRuntime::new(
+            session,
+            TextToolCompatApiClient { call_count: 0 },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("create the file", None)
+            .expect("compat tool call should execute");
+
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(summary.tool_results.len(), 1);
+        let observed = observed.lock().expect("observed input lock");
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].contains("D:/Proj 1/index.html"));
+    }
+
+    fn run_guarded_compat_scenario(first_response: &'static str) -> (usize, usize) {
+        let executor =
+            StaticToolExecutor::new().register("write_file", |_input| Ok("created".to_string()));
+        let mut session = Session::new();
+        session.model = Some("gpt-oss-120b".to_string());
+        let mut runtime = ConversationRuntime::new(
+            session,
+            GuardedCompatApiClient {
+                call_count: 0,
+                first_response,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        let summary = runtime
+            .run_turn("build a pacman game in an html", None)
+            .expect("guarded scenario should recover");
+        (summary.iterations, summary.tool_results.len())
+    }
+
+    #[test]
+    fn malformed_compat_tool_call_is_nudged_instead_of_treated_as_completion() {
+        let (iterations, tool_results) = run_guarded_compat_scenario(
+            r#"{"tool":"write_file","arguments":{"path":"pacman.html",broken}}"#,
+        );
+        assert_eq!(iterations, 3);
+        assert_eq!(tool_results, 1);
+    }
+
+    #[test]
+    fn unsupported_filesystem_success_claim_is_nudged_until_tool_evidence_exists() {
+        let (iterations, tool_results) =
+            run_guarded_compat_scenario("The file has been created and the game is complete.");
+        assert_eq!(iterations, 3);
+        assert_eq!(tool_results, 1);
+    }
+
+    #[test]
+    fn code_only_response_to_build_request_is_nudged_into_tool_execution() {
+        let (iterations, tool_results) = run_guarded_compat_scenario(
+            "Here are the three file contents. Run write_file for each JSON block.",
+        );
+        assert_eq!(iterations, 3);
+        assert_eq!(tool_results, 1);
+    }
+
+    #[test]
+    fn pending_filesystem_execution_survives_follow_up_questions_until_write_succeeds() {
+        let mut session = Session::new();
+        session
+            .push_user_text("build a pacman game in an html")
+            .expect("user message");
+        session
+            .push_message(crate::session::ConversationMessage::assistant(vec![
+                ContentBlock::Text {
+                    text: "Here is the code; use write_file.".to_string(),
+                },
+            ]))
+            .expect("assistant message");
+        session
+            .push_user_text("where is it located?")
+            .expect("follow-up");
+        assert!(session_has_pending_filesystem_execution(&session));
+
+        session
+            .push_message(crate::session::ConversationMessage::tool_result(
+                "tool-1",
+                "write_file",
+                "created",
+                false,
+            ))
+            .expect("tool result");
+        assert!(!session_has_pending_filesystem_execution(&session));
+    }
+
+    #[test]
+    fn failed_tool_result_does_not_count_as_success_evidence() {
+        let mut attempts = 0_u8;
+        let executor = StaticToolExecutor::new().register("write_file", move |_input| {
+            attempts = attempts.saturating_add(1);
+            if attempts == 1 {
+                Err(ToolError::new("simulated write failure"))
+            } else {
+                Ok("created".to_string())
+            }
+        });
+        let mut session = Session::new();
+        session.model = Some("gpt-oss-120b".to_string());
+        let mut runtime = ConversationRuntime::new(
+            session,
+            FailedThenClaimedApiClient { call_count: 0 },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("build a pacman game in an html", None)
+            .expect("second write should recover");
+
+        assert_eq!(summary.iterations, 4);
+        assert_eq!(summary.tool_results.len(), 2);
+        assert!(tool_result_succeeded(
+            summary.tool_results.last().expect("successful result")
+        ));
     }
 
     impl ApiClient for ScriptedApiClient {
@@ -1508,6 +2272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell hook fixture")]
     fn appends_post_tool_hook_feedback_to_tool_result() {
         struct TwoCallApiClient {
             calls: usize,

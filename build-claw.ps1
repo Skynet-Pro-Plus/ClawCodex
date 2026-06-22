@@ -19,7 +19,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-Push-Location $RustDir
+Push-Location -LiteralPath $RustDir
 try {
     Write-Host "Building release rusty-claude-cli (claw)..." -ForegroundColor Cyan
     cargo build --release -p rusty-claude-cli

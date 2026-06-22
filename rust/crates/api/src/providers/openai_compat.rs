@@ -28,7 +28,12 @@ const DEFAULT_MAX_RETRIES: u32 = 8;
 /// Providers that hit output-token limits without sending [DONE] will stall
 /// the connection indefinitely; this timeout surfaces that as an error instead
 /// of blocking the process forever.
-const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum time to wait for response headers after sending a request. Without
+/// this, a connection that dies between send and response (proxy/VPN drop,
+/// provider blackhole) leaves the client awaiting headers forever — observed
+/// as an indefinite "thinking" hang with no open socket.
+const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompatConfig {
@@ -275,14 +280,24 @@ impl OpenAiCompatClient {
         check_request_body_size(request, self.config())?;
 
         let request_url = chat_completions_endpoint(&self.base_url);
-        self.http
+        let send_future = self
+            .http
             .post(&request_url)
             .header("content-type", "application/json")
             .bearer_auth(&self.api_key)
             .json(&build_chat_completion_request(request, self.config()))
-            .send()
-            .await
-            .map_err(ApiError::from)
+            .send();
+        match tokio::time::timeout(RESPONSE_HEADERS_TIMEOUT, send_future).await {
+            Ok(result) => result.map_err(ApiError::from),
+            Err(_) => Err(ApiError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "no response headers after {}s — the connection to the provider \
+                     likely dropped silently; check network/VPN/proxy and retry",
+                    RESPONSE_HEADERS_TIMEOUT.as_secs()
+                ),
+            ))),
+        }
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
@@ -946,17 +961,17 @@ pub fn build_chat_completion_request(
 }
 
 /// Returns true for models that do NOT support the `is_error` field in tool results.
-/// kimi models (via Moonshot AI/Dashscope) reject this field with 400 Bad Request.
-/// Returns true for models that do NOT support the `is_error` field in tool results.
-/// kimi models (via Moonshot AI/Dashscope) reject this field with 400 Bad Request.
+/// Kimi and Cerebras-hosted GPT-OSS/GLM models reject this field with 400.
 /// Public for benchmarking and testing purposes.
 #[must_use]
 pub fn model_rejects_is_error_field(model: &str) -> bool {
     let lowered = model.to_ascii_lowercase();
     // Strip any provider/ prefix for the check
     let canonical = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
-    // kimi models (kimi-k2.5, kimi-k1.5, kimi-moonshot, etc.)
     canonical.starts_with("kimi")
+        || canonical.starts_with("gpt-oss")
+        || canonical.starts_with("zai-glm")
+        || canonical.starts_with("glm-")
 }
 
 /// Translates an `InputMessage` into OpenAI-compatible message format.
@@ -1322,9 +1337,12 @@ fn parse_sse_frame(
 }
 
 fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
+    if let Some(value) = super::dotenv_value(key).filter(|value| !value.trim().is_empty()) {
+        return Ok(Some(value));
+    }
     match std::env::var(key) {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(super::dotenv_value(key)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(ApiError::from(error)),
     }
 }
@@ -1337,13 +1355,13 @@ pub fn has_api_key(key: &str) -> bool {
         .is_some()
 }
 
-/// Read `OPENAI_API_KEY` from the process environment or a nearby `.env` file.
+/// Read `OPENAI_API_KEY`, preferring the repo `.env` over process environment.
 #[must_use]
 pub fn read_openai_api_key() -> Option<String> {
     read_env_non_empty("OPENAI_API_KEY").ok().flatten()
 }
 
-/// Read `OPENAI_BASE_URL` when explicitly set (environment or `.env`); does not substitute the
+/// Read `OPENAI_BASE_URL` when explicitly set (`.env` or environment); does not substitute the
 /// default `OpenAI` API host.
 #[must_use]
 pub fn read_openai_base_url_explicit() -> Option<String> {
@@ -1352,15 +1370,19 @@ pub fn read_openai_base_url_explicit() -> Option<String> {
 
 #[must_use]
 pub fn read_base_url(config: OpenAiCompatConfig) -> String {
+    if let Some(value) = super::dotenv_value(config.base_url_env) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
     if let Ok(value) = std::env::var(config.base_url_env) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             return trimmed.to_string();
         }
     }
-    super::dotenv_value(config.base_url_env)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| config.default_base_url.to_string())
+    config.default_base_url.to_string()
 }
 
 fn chat_completions_endpoint(base_url: &str) -> String {
@@ -1973,6 +1995,9 @@ mod tests {
         assert!(super::model_rejects_is_error_field("KIMI-K2.5")); // case insensitive
         assert!(super::model_rejects_is_error_field("dashscope/kimi-k2.5")); // with prefix
         assert!(super::model_rejects_is_error_field("moonshot/kimi-k2.5")); // different prefix
+        assert!(super::model_rejects_is_error_field("gpt-oss-120b"));
+        assert!(super::model_rejects_is_error_field("cerebras/gpt-oss-120b"));
+        assert!(super::model_rejects_is_error_field("zai-glm-4.7"));
 
         // Non-kimi models should NOT be detected
         assert!(!super::model_rejects_is_error_field("gpt-4o"));
@@ -2079,6 +2104,12 @@ mod tests {
         assert!(
             translated3[0].get("is_error").is_none(),
             "dashscope/kimi-k2.5 must NOT include is_error field"
+        );
+
+        let translated4 = super::translate_message(&message, "gpt-oss-120b");
+        assert!(
+            translated4[0].get("is_error").is_none(),
+            "Cerebras GPT-OSS must not receive is_error"
         );
     }
 

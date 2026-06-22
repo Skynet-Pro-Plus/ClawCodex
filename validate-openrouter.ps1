@@ -153,7 +153,7 @@ catch {
 
     Write-Host "  STATUS: OpenRouter did not return a usable response for this key (network or HTTP error)." -ForegroundColor DarkYellow
     Write-Host "  INFO:   $($_.Exception.Message)" -ForegroundColor DarkGray
-    Write-Host "  NEXT:   Re-enter the key or check internet / VPN / firewall if this repeats." -ForegroundColor DarkYellow
+    Write-Host "  NEXT:   Check internet / VPN / firewall / proxy if this repeats." -ForegroundColor DarkYellow
     Write-Host ""
     exit 3
 }

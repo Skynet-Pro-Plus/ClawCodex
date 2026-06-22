@@ -26,6 +26,21 @@ function Ensure-DotEnvFromExample {
     Write-Host "Created .env from .env.example (edit placeholder next)." -ForegroundColor Yellow
 }
 
+function Protect-LocalCredentialFile {
+    param([string]$Path)
+    if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) { return }
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, "FullControl", "Allow"))
+        $acl.SetAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new("SYSTEM", "FullControl", "Allow"))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        Write-Host "  NOTE:   Saved .env, but could not tighten file ACLs: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+}
+
 Ensure-DotEnvFromExample
 
 Write-Host ""
@@ -90,12 +105,24 @@ if (-not $hadBase) {
     $lines.Add("OPENAI_BASE_URL=https://openrouter.ai/api/v1")
 }
 
+$hadProvider = $false
+for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^\s*CLAW_PROVIDER\s*=') {
+        $lines[$i] = "CLAW_PROVIDER=openrouter"
+        $hadProvider = $true
+    }
+}
+if (-not $hadProvider) {
+    $lines.Add("CLAW_PROVIDER=openrouter")
+}
+
 if (-not $hadKey) {
     $lines.Add("OPENAI_API_KEY=$plain")
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines($DotEnv, $lines.ToArray(), $utf8NoBom)
+Protect-LocalCredentialFile -Path $DotEnv
 
 $verify = (Get-Content -LiteralPath $DotEnv -Encoding UTF8 |
     Where-Object { $_ -match '^\s*OPENAI_API_KEY\s*=' } |

@@ -8,13 +8,17 @@ on:
       - 'omx-issue-*'
     paths:
       - .github/workflows/rust-ci.yml
+      - .github/dependabot.yml
       - .github/scripts/check_doc_source_of_truth.py
       - .github/FUNDING.yml
+      - "*.bat"
+      - "*.ps1"
       - README.md
       - USAGE.md
       - PARITY.md
       - PHILOSOPHY.md
       - ROADMAP.md
+      - bin/windows/**
       - docs/**
       - rust/**
   pull_request:
@@ -22,13 +26,17 @@ on:
       - main
     paths:
       - .github/workflows/rust-ci.yml
+      - .github/dependabot.yml
       - .github/scripts/check_doc_source_of_truth.py
       - .github/FUNDING.yml
+      - "*.bat"
+      - "*.ps1"
       - README.md
       - USAGE.md
       - PARITY.md
       - PHILOSOPHY.md
       - ROADMAP.md
+      - bin/windows/**
       - docs/**
       - rust/**
   workflow_dispatch:
@@ -64,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -78,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.86.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -86,15 +94,29 @@ jobs:
         run: cargo test --workspace
 
   clippy-workspace:
-    name: cargo clippy --workspace
+    name: cargo clippy --workspace --all-targets -- -D warnings
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
       - name: Run workspace clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run dependency audit
+        run: cargo audit

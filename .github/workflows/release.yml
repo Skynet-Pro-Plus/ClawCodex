@@ -32,13 +32,17 @@ jobs:
             os: macos-14
             bin: claw
             artifact_name: claw-macos-arm64
+          - name: windows-x64
+            os: windows-latest
+            bin: claw.exe
+            artifact_name: claw-windows-x64.exe
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.86.0
 
       - uses: Swatinem/rust-cache@v2
         with:

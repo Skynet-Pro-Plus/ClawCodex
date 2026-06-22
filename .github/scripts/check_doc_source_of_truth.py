@@ -6,7 +6,7 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-FILES = [
+EXPECTED_FILES = [
     ROOT / 'README.md',
     ROOT / 'USAGE.md',
     ROOT / 'PARITY.md',
@@ -14,7 +14,9 @@ FILES = [
     ROOT / 'ROADMAP.md',
     ROOT / '.github' / 'FUNDING.yml',
 ]
+FILES = list(EXPECTED_FILES)
 FILES.extend(sorted((ROOT / 'docs').rglob('*.md')) if (ROOT / 'docs').exists() else [])
+FILES.extend(sorted((ROOT / 'rust').rglob('*.md')) if (ROOT / 'rust').exists() else [])
 
 FORBIDDEN = {
     r'github\.com/Yeachan-Heo/claw-code(?!-parity)': 'replace old claw-code GitHub links with ultraworkers/claw-code',
@@ -27,6 +29,10 @@ FORBIDDEN = {
 }
 
 errors: list[str] = []
+for path in EXPECTED_FILES:
+    if not path.exists():
+        errors.append(f'{path.relative_to(ROOT)}: expected canonical file is missing')
+
 for path in FILES:
     if not path.exists():
         continue

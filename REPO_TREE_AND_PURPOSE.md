@@ -10,16 +10,16 @@ This file is a **map of the repository layout** and **what each major area is fo
 
 ```text
 ClawCodex/
-├── .github/              CI, releases, doc checks
-├── .claude/              IDE/agent session JSON (tracked in this clone)
-├── assets/               README / marketing images
-├── docs/                 Extra guides (container, model compatibility)
-├── rust/                 Canonical Rust workspace; builds `claw` binary
-├── src/                  Companion Python / reference + parity audit helpers
-├── tests/                Python tests for porting workspace
-├── README.md, USAGE.md, PARITY.md, ROADMAP.md, PHILOSOPHY.md, CLAUDE.md
-├── Containerfile, install.sh, prd.json, progress.txt
-└── (local) launch.bat, launch.ps1, SPEC.md, Demos/, tool_audit/, …
++-- .github/              CI, releases, doc checks
++-- .claude/              IDE/agent session JSON (tracked in this clone)
++-- assets/               README / marketing images
++-- docs/                 Extra guides (container, model compatibility)
++-- rust/                 Canonical Rust workspace; builds `claw` binary
++-- src/                  Companion Python / reference + parity audit helpers
++-- tests/                Python tests for porting workspace
++-- README.md, USAGE.md, PARITY.md, ROADMAP.md, PHILOSOPHY.md, CLAUDE.md
++-- Containerfile, install.sh, prd.json, progress.txt
++-- (local) launch.bat, launch.ps1, SPEC.md, Demos/, tool_audit/, ...
 ```
 
 ---
@@ -70,7 +70,7 @@ Static images for README, social proof, and documentation (hero image, screensho
 
 ---
 
-## `rust/` — canonical implementation
+## `rust/` - canonical implementation
 
 The **primary product** is the Rust workspace under `rust/`. It builds the **`claw`** binary from the `rusty-claude-cli` crate (`[[bin]] name = "claw"`).
 
@@ -107,16 +107,16 @@ Tests and benches live beside crates (`tests/`, `benches/` under `api`, integrat
 
 ---
 
-## `src/` — Python companion
+## `src/` - Python companion
 
 Per [`README.md`](README.md), this tree is a **companion / reference / audit** workspace, **not** the primary `claw` runtime.
 
 | Area | Role |
 |------|------|
-| `main.py`, `runtime.py`, `replLauncher.py`, `commands.py`, `tools.py`, … | Historical or parallel Python implementation and helpers for porting and behavior comparison. |
+| `main.py`, `runtime.py`, `replLauncher.py`, `commands.py`, `tools.py`, ... | Historical or parallel Python implementation and helpers for porting and behavior comparison. |
 | `parity_audit.py`, `port_manifest.py` | Auditing and manifest machinery for parity with the Rust port. |
 | `reference_data/` | JSON snapshots of commands, tools, subsystems, and archive surfaces used by audits and tests. |
-| Package subdirs (`assistant/`, `bootstrap/`, `bridge/`, …) | Subsystem-oriented modules; many are package markers plus focused logic. |
+| Package subdirs (`assistant/`, `bootstrap/`, `bridge/`, ...) | Subsystem-oriented modules; many are package markers plus focused logic. |
 | `setup.py` | Legacy packaging entry for the Python tree where still applicable. |
 
 Treat this as **supporting material** unless you are explicitly working on Python-side audits or migration tooling.
@@ -144,7 +144,7 @@ The list below is the complete output of `git ls-files` sorted lexicographically
 `git ls-files | Sort-Object`
 
 ```text
-﻿.claude.json
+ï»¿.claude.json
 .claude/sessions/session-1774998936453.json
 .claude/sessions/session-1774998994373.json
 .claude/sessions/session-1775007533836.json

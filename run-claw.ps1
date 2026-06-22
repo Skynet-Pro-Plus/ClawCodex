@@ -1,4 +1,8 @@
 #Requires -Version 5.1
+param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ClawArgs
+)
 <#
 .SYNOPSIS
   Run the packaged ClawCodex `claw` CLI from this repo folder.
@@ -9,39 +13,222 @@
 
   Prefer run-claw.bat if you want Command Prompt without invoking PowerShell.
 
-  Credentials: put OpenRouter settings in a repo-root `.env` (copy from .env.example),
-  or let claw prompt once on first run (see USAGE.md). Optional: set env vars for CI.
+  Credentials: repo-root `.env` (copy from .env.example). Use START-CLAW.bat for
+  the interactive OpenRouter/Cerebras/Z.ai/DeepSeek/Kimi picker and key prompts.
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ClawExe = Join-Path $RepoRoot "bin\windows\claw.exe"
+$PackagedClawExe = Join-Path $RepoRoot "bin\windows\claw.exe"
+$BuiltClawExe = Join-Path $env:LOCALAPPDATA "ClawCodex\cargo-target\release\claw.exe"
+$ClawExe = if (Test-Path -LiteralPath $BuiltClawExe) { $BuiltClawExe } else { $PackagedClawExe }
+$OpenRouterBase = "https://openrouter.ai/api/v1"
+$CerebrasBase = "https://api.cerebras.ai/v1"
+$DefaultCerebrasModel = "gpt-oss-120b"
+$ZaiBase = "https://open.bigmodel.cn/api/paas/v4"
+$DefaultZaiModel = "glm-5.2"
+$DeepSeekBase = "https://api.deepseek.com"
+$DefaultDeepSeekModel = "deepseek-v4-flash"
+$KimiBase = "https://api.moonshot.ai/v1"
+$DefaultKimiModel = "kimi-k2.7-code"
+
+function Read-RepoDotEnv {
+    param([string]$Path)
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $map }
+    Get-Content -LiteralPath $Path -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) { return }
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) { return }
+        $name = $line.Substring(0, $eq).Trim()
+        $value = $line.Substring($eq + 1).Trim()
+        if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if ($value.Length -ge 2 -and $value.StartsWith("'") -and $value.EndsWith("'")) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $map[$name] = $value
+    }
+    return $map
+}
+
+function Is-PlaceholderKey {
+    param([string]$Value)
+    return [string]::IsNullOrWhiteSpace($Value) -or
+        ($Value -eq "YOUR_OPENROUTER_KEY_HERE") -or
+        ($Value -eq "YOUR_CEREBRAS_KEY_HERE") -or
+        ($Value -eq "YOUR_ZAI_KEY_HERE") -or
+        ($Value -eq "YOUR_DEEPSEEK_KEY_HERE") -or
+        ($Value -eq "YOUR_KIMI_KEY_HERE") -or
+        ($Value -eq "YOUR_MOONSHOT_KEY_HERE")
+}
+
+function Test-ArgsIncludeModel {
+    param([string[]]$ClawArgs)
+    for ($i = 0; $i -lt $ClawArgs.Count; $i++) {
+        if ($ClawArgs[$i] -eq "--model" -or $ClawArgs[$i] -eq "-m") { return $true }
+        if ($ClawArgs[$i].StartsWith("--model=")) { return $true }
+    }
+    return $false
+}
+
+function Apply-ProviderFromDotEnv {
+    param(
+        [hashtable]$DotEnv,
+        [string[]]$ClawArgs
+    )
+
+    $provider = $DotEnv["CLAW_PROVIDER"]
+    if ([string]::IsNullOrWhiteSpace($provider)) { $provider = "openrouter" }
+    $provider = $provider.Trim().ToLowerInvariant()
+
+    if ($provider -eq "cerebras") {
+        $key = $DotEnv["CEREBRAS_API_KEY"]
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["OPENAI_API_KEY"] }
+        if (-not (Is-PlaceholderKey $key)) {
+            $env:OPENAI_BASE_URL = $CerebrasBase
+            $env:OPENAI_API_KEY = $key
+            $env:CEREBRAS_API_KEY = $key
+        }
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+        $env:CLAW_PROVIDER = "cerebras"
+
+        if (-not (Test-ArgsIncludeModel -ClawArgs $ClawArgs)) {
+            $model = $DotEnv["CLAW_CEREBRAS_MODEL"]
+            if ([string]::IsNullOrWhiteSpace($model)) { $model = $DefaultCerebrasModel }
+            return @("--model", $model) + $ClawArgs
+        }
+        return $ClawArgs
+    }
+
+    if ($provider -eq "zai") {
+        $base = $DotEnv["ZAI_BASE_URL"]
+        if ([string]::IsNullOrWhiteSpace($base)) { $base = $ZaiBase }
+        $key = $DotEnv["ZAI_API_KEY"]
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["OPENAI_API_KEY"] }
+        if (-not (Is-PlaceholderKey $key)) {
+            $env:OPENAI_BASE_URL = $base
+            $env:OPENAI_API_KEY = $key
+            $env:ZAI_API_KEY = $key
+        }
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+        $env:CLAW_PROVIDER = "zai"
+
+        if (-not (Test-ArgsIncludeModel -ClawArgs $ClawArgs)) {
+            $model = $DotEnv["CLAW_ZAI_MODEL"]
+            if ([string]::IsNullOrWhiteSpace($model)) { $model = $DefaultZaiModel }
+            return @("--model", $model) + $ClawArgs
+        }
+        return $ClawArgs
+    }
+
+    if ($provider -eq "deepseek") {
+        $base = $DotEnv["DEEPSEEK_BASE_URL"]
+        if ([string]::IsNullOrWhiteSpace($base)) { $base = $DeepSeekBase }
+        $key = $DotEnv["DEEPSEEK_API_KEY"]
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["OPENAI_API_KEY"] }
+        if (-not (Is-PlaceholderKey $key)) {
+            $env:OPENAI_BASE_URL = $base
+            $env:OPENAI_API_KEY = $key
+            $env:DEEPSEEK_API_KEY = $key
+        }
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+        $env:CLAW_PROVIDER = "deepseek"
+
+        if (-not (Test-ArgsIncludeModel -ClawArgs $ClawArgs)) {
+            $model = $DotEnv["CLAW_DEEPSEEK_MODEL"]
+            if ([string]::IsNullOrWhiteSpace($model)) { $model = $DefaultDeepSeekModel }
+            return @("--model", $model) + $ClawArgs
+        }
+        return $ClawArgs
+    }
+
+    if ($provider -eq "kimi") {
+        $base = $DotEnv["KIMI_BASE_URL"]
+        if ([string]::IsNullOrWhiteSpace($base)) { $base = $KimiBase }
+        $key = $DotEnv["KIMI_API_KEY"]
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["MOONSHOT_API_KEY"] }
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["OPENAI_API_KEY"] }
+        if (-not (Is-PlaceholderKey $key)) {
+            $env:OPENAI_BASE_URL = $base
+            $env:OPENAI_API_KEY = $key
+            $env:KIMI_API_KEY = $key
+            $env:MOONSHOT_API_KEY = $key
+        }
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+        $env:CLAW_PROVIDER = "kimi"
+
+        if (-not (Test-ArgsIncludeModel -ClawArgs $ClawArgs)) {
+            $model = $DotEnv["CLAW_KIMI_MODEL"]
+            if ([string]::IsNullOrWhiteSpace($model)) { $model = $DefaultKimiModel }
+            return @("--model", $model) + $ClawArgs
+        }
+        return $ClawArgs
+    }
+
+    Remove-Item Env:CLAW_SKIP_OPENROUTER_MODEL_PICKER -ErrorAction SilentlyContinue
+    Remove-Item Env:CLAW_NO_CREDENTIAL_PROMPT -ErrorAction SilentlyContinue
+    Remove-Item Env:ZAI_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:KIMI_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:MOONSHOT_API_KEY -ErrorAction SilentlyContinue
+    $key = $DotEnv["OPENAI_API_KEY"]
+    if (-not (Is-PlaceholderKey $key)) {
+        $env:OPENAI_BASE_URL = $OpenRouterBase
+        $env:OPENAI_API_KEY = $key
+    }
+    return $ClawArgs
+}
 
 if (-not (Test-Path -LiteralPath $ClawExe)) {
     Write-Host "Missing: $ClawExe" -ForegroundColor Red
     Write-Host "Build it first:  .\build-claw.ps1" -ForegroundColor Yellow
     exit 1
 }
+Write-Host ("Using CLI binary: {0}" -f $ClawExe) -ForegroundColor DarkGray
 
-$base = $env:OPENAI_BASE_URL
-$openrouterBaseOk = $false
-if ($base) {
-    $openrouterBaseOk = $base.ToLowerInvariant().Contains("openrouter")
-}
-$hasAuthFromEnv = [bool]($env:OPENAI_API_KEY -and $openrouterBaseOk)
 $dotenvPath = Join-Path $RepoRoot ".env"
-$hasDotenvFile = Test-Path -LiteralPath $dotenvPath
+$dotenv = Read-RepoDotEnv -Path $dotenvPath
+$provider = if ($dotenv.ContainsKey("CLAW_PROVIDER")) { $dotenv["CLAW_PROVIDER"].Trim().ToLowerInvariant() } else { "openrouter" }
 
-if (-not $hasAuthFromEnv -and -not $hasDotenvFile) {
-    Write-Host "OpenRouter: no credentials yet." -ForegroundColor Yellow
-    Write-Host "  One place only: copy .env.example to .env in this repo folder, edit OPENAI_API_KEY once, then run this script again." -ForegroundColor Yellow
-    Write-Host "  (Advanced: set OPENAI_BASE_URL + OPENAI_API_KEY in your shell instead of using .env.)" -ForegroundColor DarkGray
+$hasCreds = $false
+if ($provider -eq "cerebras") {
+    $cKey = $dotenv["CEREBRAS_API_KEY"]
+    if (Is-PlaceholderKey $cKey) { $cKey = $dotenv["OPENAI_API_KEY"] }
+    $hasCreds = -not (Is-PlaceholderKey $cKey)
+} elseif ($provider -eq "zai") {
+    $zKey = $dotenv["ZAI_API_KEY"]
+    if (Is-PlaceholderKey $zKey) { $zKey = $dotenv["OPENAI_API_KEY"] }
+    $hasCreds = -not (Is-PlaceholderKey $zKey)
+} elseif ($provider -eq "deepseek") {
+    $dKey = $dotenv["DEEPSEEK_API_KEY"]
+    if (Is-PlaceholderKey $dKey) { $dKey = $dotenv["OPENAI_API_KEY"] }
+    $hasCreds = -not (Is-PlaceholderKey $dKey)
+} elseif ($provider -eq "kimi") {
+    $kKey = $dotenv["KIMI_API_KEY"]
+    if (Is-PlaceholderKey $kKey) { $kKey = $dotenv["MOONSHOT_API_KEY"] }
+    if (Is-PlaceholderKey $kKey) { $kKey = $dotenv["OPENAI_API_KEY"] }
+    $hasCreds = -not (Is-PlaceholderKey $kKey)
+} else {
+    $hasCreds = -not (Is-PlaceholderKey $dotenv["OPENAI_API_KEY"])
+}
+
+if (-not $hasCreds) {
+    Write-Host "No saved credentials for provider '$provider'." -ForegroundColor Yellow
+    Write-Host "  Run START-CLAW.bat to choose OpenRouter, Cerebras, Z.ai, DeepSeek, or Kimi and enter a key." -ForegroundColor Yellow
     Write-Host ""
 }
 
-# Run with cwd = repo root so repo-root .env is found even if you started this script from elsewhere.
+$resolvedClawArgs = Apply-ProviderFromDotEnv -DotEnv $dotenv -ClawArgs $ClawArgs
+
 Push-Location -LiteralPath $RepoRoot
 try {
-    & $ClawExe @args
+    & $ClawExe @resolvedClawArgs
 } finally {
     Pop-Location
 }

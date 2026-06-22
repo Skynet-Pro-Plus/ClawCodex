@@ -28,6 +28,21 @@ const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 300;
 #[cfg(not(test))]
 const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 30_000;
 
+/// Upper bound for a single LSP-framed MCP payload.
+pub const MCP_MAX_FRAME_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) fn validate_mcp_content_length(content_length: usize) -> io::Result<usize> {
+    if content_length > MCP_MAX_FRAME_SIZE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "MCP frame Content-Length {content_length} exceeds maximum {MCP_MAX_FRAME_SIZE_BYTES}"
+            ),
+        ));
+    }
+    Ok(content_length)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum JsonRpcId {
@@ -1241,6 +1256,7 @@ impl McpStdioProcess {
         let content_length = content_length.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
         })?;
+        let content_length = validate_mcp_content_length(content_length)?;
         let mut payload = vec![0_u8; content_length];
         self.stdout.read_exact(&mut payload).await?;
         Ok(payload)
@@ -1425,10 +1441,11 @@ mod tests {
     use crate::mcp_client::McpClientBootstrap;
 
     use super::{
-        spawn_mcp_stdio_process, unsupported_server_failed_server, JsonRpcId, JsonRpcRequest,
-        JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams, McpInitializeResult,
-        McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams, McpReadResourceResult,
-        McpServerManager, McpServerManagerError, McpStdioProcess, McpTool, McpToolCallParams,
+        spawn_mcp_stdio_process, unsupported_server_failed_server, validate_mcp_content_length,
+        JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams,
+        McpInitializeResult, McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams,
+        McpReadResourceResult, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
+        McpToolCallParams, MCP_MAX_FRAME_SIZE_BYTES,
     };
     use crate::McpLifecyclePhase;
 
@@ -1440,6 +1457,17 @@ mod tests {
             .as_nanos();
         let unique_id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}-{unique_id}"))
+    }
+
+    #[test]
+    fn validates_mcp_content_length_cap() {
+        assert_eq!(
+            validate_mcp_content_length(MCP_MAX_FRAME_SIZE_BYTES).expect("at cap"),
+            MCP_MAX_FRAME_SIZE_BYTES
+        );
+        let error = validate_mcp_content_length(MCP_MAX_FRAME_SIZE_BYTES + 1)
+            .expect_err("above cap should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 
     fn set_executable_permissions(path: &Path) {
@@ -1850,6 +1878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses /bin/sh fixture")]
     fn spawns_stdio_process_and_round_trips_io() {
         let runtime = Builder::new_current_thread()
             .enable_all()
@@ -2052,6 +2081,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses /bin/sh fixture")]
     fn direct_spawn_uses_transport_env() {
         let runtime = Builder::new_current_thread()
             .enable_all()
@@ -2485,6 +2515,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "stdio timing fixture is POSIX-oriented")]
     fn given_initialize_hangs_once_when_discover_tools_then_manager_retries_and_succeeds() {
         let runtime = Builder::new_current_thread()
             .enable_all()
@@ -2534,6 +2565,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "stdio timing fixture is POSIX-oriented")]
     fn given_tool_call_disconnects_once_when_calling_twice_then_manager_resets_and_next_call_succeeds(
     ) {
         let runtime = Builder::new_current_thread()
@@ -2688,6 +2720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "uses /bin/sh failure fixture")]
     fn manager_discovery_report_keeps_healthy_servers_when_one_server_fails() {
         let runtime = Builder::new_current_thread()
             .enable_all()

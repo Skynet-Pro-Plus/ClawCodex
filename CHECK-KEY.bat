@@ -11,14 +11,14 @@ echo  ------------------------------------------------------------------
 echo   OpenRouter live check - command you can copy into PowerShell:
 echo  ------------------------------------------------------------------
 echo.
-echo   powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\validate-openrouter.ps1"
+echo   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0validate-openrouter.ps1"
 echo.
 echo  ------------------------------------------------------------------
 echo   Running that command now...
 echo  ------------------------------------------------------------------
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\validate-openrouter.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0validate-openrouter.ps1"
 set OR_EXIT=%errorlevel%
 
 echo.

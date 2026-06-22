@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-#[cfg(not(windows))]
 use std::path::Path;
 use std::process::Command;
 
@@ -282,18 +281,29 @@ fn format_hook_warning(command: &str, code: i32, stdout: Option<&str>, stderr: &
 fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(windows)]
     let command_builder = {
-        let mut command_builder = Command::new("cmd");
-        command_builder.arg("/C").arg(command);
+        let path = Path::new(command);
+        let mut command_builder = if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sh"))
+        {
+            Command::new(crate::shell_program())
+        } else {
+            let mut command = Command::new("cmd");
+            command.arg("/C");
+            command
+        };
+        command_builder.arg(command);
         CommandWithStdin::new(command_builder)
     };
 
     #[cfg(not(windows))]
     let command_builder = if Path::new(command).exists() {
-        let mut command_builder = Command::new("sh");
+        let mut command_builder = Command::new(crate::shell_program());
         command_builder.arg(command);
         CommandWithStdin::new(command_builder)
     } else {
-        let mut command_builder = Command::new("sh");
+        let mut command_builder = Command::new(crate::shell_program());
         command_builder.arg("-lc").arg(command);
         CommandWithStdin::new(command_builder)
     };
@@ -499,8 +509,13 @@ mod tests {
     #[test]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         // given
+        let command = if cfg!(windows) {
+            "echo blocked by plugin & exit /b 2"
+        } else {
+            "printf 'blocked by plugin'; exit 2"
+        };
         let runner = HookRunner::new(crate::PluginHooks {
-            pre_tool_use: vec!["printf 'blocked by plugin'; exit 2".to_string()],
+            pre_tool_use: vec![command.to_string()],
             post_tool_use: Vec::new(),
             post_tool_use_failure: Vec::new(),
         });
@@ -516,11 +531,18 @@ mod tests {
     #[test]
     fn propagates_plugin_hook_failures() {
         // given
+        let broken = if cfg!(windows) {
+            "echo broken plugin hook & exit /b 1"
+        } else {
+            "printf 'broken plugin hook'; exit 1"
+        };
+        let later = if cfg!(windows) {
+            "echo later plugin hook"
+        } else {
+            "printf 'later plugin hook'"
+        };
         let runner = HookRunner::new(crate::PluginHooks {
-            pre_tool_use: vec![
-                "printf 'broken plugin hook'; exit 1".to_string(),
-                "printf 'later plugin hook'".to_string(),
-            ],
+            pre_tool_use: vec![broken.to_string(), later.to_string()],
             post_tool_use: Vec::new(),
             post_tool_use_failure: Vec::new(),
         });

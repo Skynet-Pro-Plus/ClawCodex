@@ -7,8 +7,8 @@ cd /d "%~dp0"
 title ClawCodex - update OpenRouter key
 echo.
 echo  Command:
-echo    powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\set-openrouter-key.ps1"
+echo    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-openrouter-key.ps1"
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\set-openrouter-key.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-openrouter-key.ps1"
 echo.
 pause

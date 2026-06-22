@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{JsonError, JsonValue};
 use crate::usage::TokenUsage;
+use serde::Serialize;
 
 const SESSION_VERSION: u32 = 1;
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
@@ -73,6 +74,31 @@ pub struct SessionPromptEntry {
     pub text: String,
 }
 
+/// Durable high-level task state preserved across compaction and resume.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct SessionTaskLedger {
+    pub objective: Option<String>,
+    pub constraints: Vec<String>,
+    pub decisions: Vec<String>,
+    pub relevant_paths: Vec<String>,
+    pub changed_paths: Vec<String>,
+    pub verification: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub repo_snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionTaskLedgerUpdate {
+    pub objective: Option<String>,
+    pub constraints: Vec<String>,
+    pub decisions: Vec<String>,
+    pub relevant_paths: Vec<String>,
+    pub changed_paths: Vec<String>,
+    pub verification: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub repo_snapshot_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionPersistence {
     path: PathBuf,
@@ -97,6 +123,7 @@ pub struct Session {
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
     pub prompt_history: Vec<SessionPromptEntry>,
+    pub task_ledger: SessionTaskLedger,
     /// The model used in this session, persisted so resumed sessions can
     /// report which model was originally used.
     /// Timestamp of last successful health check (ROADMAP #38)
@@ -116,6 +143,7 @@ impl PartialEq for Session {
             && self.fork == other.fork
             && self.workspace_root == other.workspace_root
             && self.prompt_history == other.prompt_history
+            && self.task_ledger == other.task_ledger
             && self.last_health_check_ms == other.last_health_check_ms
     }
 }
@@ -168,6 +196,7 @@ impl Session {
             fork: None,
             workspace_root: None,
             prompt_history: Vec::new(),
+            task_ledger: SessionTaskLedger::default(),
             last_health_check_ms: None,
             model: None,
             persistence: None,
@@ -199,6 +228,59 @@ impl Session {
     #[must_use]
     pub fn persistence_path(&self) -> Option<&Path> {
         self.persistence.as_ref().map(|value| value.path.as_path())
+    }
+
+    #[must_use]
+    pub fn task_ledger(&self) -> &SessionTaskLedger {
+        &self.task_ledger
+    }
+
+    pub fn set_task_objective(&mut self, objective: impl Into<String>) -> Result<(), SessionError> {
+        let objective = bounded_optional_text(Some(objective.into()));
+        self.task_ledger.objective = objective;
+        self.persist_metadata_snapshot()
+    }
+
+    pub fn update_task_ledger(
+        &mut self,
+        update: SessionTaskLedgerUpdate,
+    ) -> Result<(), SessionError> {
+        if let Some(objective) = update.objective {
+            self.task_ledger.objective = bounded_optional_text(Some(objective));
+        }
+        extend_bounded_unique(&mut self.task_ledger.constraints, update.constraints);
+        extend_bounded_unique(&mut self.task_ledger.decisions, update.decisions);
+        extend_bounded_unique(
+            &mut self.task_ledger.relevant_paths,
+            normalize_paths(update.relevant_paths),
+        );
+        extend_bounded_unique(
+            &mut self.task_ledger.changed_paths,
+            normalize_paths(update.changed_paths),
+        );
+        extend_bounded_unique(&mut self.task_ledger.verification, update.verification);
+        extend_bounded_unique(&mut self.task_ledger.next_steps, update.next_steps);
+        if let Some(snapshot) = update.repo_snapshot_id {
+            self.task_ledger.repo_snapshot_id = bounded_optional_text(Some(snapshot));
+        }
+        self.persist_metadata_snapshot()
+    }
+
+    pub fn record_changed_path(&mut self, path: impl Into<String>) -> Result<(), SessionError> {
+        let path = path.into();
+        let path = normalize_single_path(&path);
+        if !path.is_empty() {
+            extend_bounded_unique(&mut self.task_ledger.changed_paths, vec![path]);
+        }
+        self.persist_metadata_snapshot()
+    }
+
+    pub fn record_verification(&mut self, command: impl Into<String>) -> Result<(), SessionError> {
+        let command = bounded_optional_text(Some(command.into())).unwrap_or_default();
+        if !command.is_empty() {
+            extend_bounded_unique(&mut self.task_ledger.verification, vec![command]);
+        }
+        self.persist_metadata_snapshot()
     }
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
@@ -272,6 +354,7 @@ impl Session {
             }),
             workspace_root: self.workspace_root.clone(),
             prompt_history: self.prompt_history.clone(),
+            task_ledger: self.task_ledger.clone(),
             last_health_check_ms: self.last_health_check_ms,
             model: self.model.clone(),
             persistence: None,
@@ -328,6 +411,9 @@ impl Session {
                 ),
             );
         }
+        if !self.task_ledger.is_empty() {
+            object.insert("task_ledger".to_string(), self.task_ledger.to_json());
+        }
         Ok(JsonValue::Object(object))
     }
 
@@ -382,6 +468,11 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default();
+        let task_ledger = object
+            .get("task_ledger")
+            .map(SessionTaskLedger::from_json)
+            .transpose()?
+            .unwrap_or_default();
         let model = object
             .get("model")
             .and_then(JsonValue::as_str)
@@ -396,12 +487,16 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
+            task_ledger,
             last_health_check_ms: None,
             model,
             persistence: None,
         })
     }
 
+    // Keeping the complete record-state transition in one place makes legacy
+    // session migration auditable; splitting it would obscure field defaults.
+    #[allow(clippy::too_many_lines)]
     fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
         let mut version = SESSION_VERSION;
         let mut session_id = None;
@@ -413,6 +508,7 @@ impl Session {
         let mut workspace_root = None;
         let mut model = None;
         let mut prompt_history = Vec::new();
+        let mut task_ledger = SessionTaskLedger::default();
 
         for (line_number, raw_line) in contents.lines().enumerate() {
             let line = raw_line.trim();
@@ -455,6 +551,9 @@ impl Session {
                         .get("model")
                         .and_then(JsonValue::as_str)
                         .map(String::from);
+                    if let Some(ledger) = object.get("task_ledger") {
+                        task_ledger = SessionTaskLedger::from_json(ledger)?;
+                    }
                 }
                 "message" => {
                     let message_value = object.get("message").ok_or_else(|| {
@@ -497,6 +596,7 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
+            task_ledger,
             last_health_check_ms: None,
             model,
             persistence: None,
@@ -607,11 +707,22 @@ impl Session {
         if let Some(model) = &self.model {
             object.insert("model".to_string(), JsonValue::String(model.clone()));
         }
+        if !self.task_ledger.is_empty() {
+            object.insert("task_ledger".to_string(), self.task_ledger.to_json());
+        }
         Ok(JsonValue::Object(object))
     }
 
     fn touch(&mut self) {
         self.updated_at_ms = current_time_millis();
+    }
+
+    fn persist_metadata_snapshot(&mut self) -> Result<(), SessionError> {
+        self.touch();
+        let Some(path) = self.persistence_path().map(PathBuf::from) else {
+            return Ok(());
+        };
+        self.save_to_path(path)
     }
 }
 
@@ -919,6 +1030,134 @@ impl SessionPromptEntry {
     }
 }
 
+impl SessionTaskLedger {
+    const MAX_OBJECTIVE_CHARS: usize = 4_000;
+    const MAX_ITEMS_PER_FIELD: usize = 64;
+    const MAX_ITEM_CHARS: usize = 512;
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objective.is_none()
+            && self.constraints.is_empty()
+            && self.decisions.is_empty()
+            && self.relevant_paths.is_empty()
+            && self.changed_paths.is_empty()
+            && self.verification.is_empty()
+            && self.next_steps.is_empty()
+            && self.repo_snapshot_id.is_none()
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        let mut object = BTreeMap::new();
+        if let Some(objective) = &self.objective {
+            object.insert(
+                "objective".to_string(),
+                JsonValue::String(objective.clone()),
+            );
+        }
+        if !self.constraints.is_empty() {
+            object.insert(
+                "constraints".to_string(),
+                JsonValue::Array(
+                    self.constraints
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.decisions.is_empty() {
+            object.insert(
+                "decisions".to_string(),
+                JsonValue::Array(
+                    self.decisions
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.relevant_paths.is_empty() {
+            object.insert(
+                "relevant_paths".to_string(),
+                JsonValue::Array(
+                    self.relevant_paths
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.changed_paths.is_empty() {
+            object.insert(
+                "changed_paths".to_string(),
+                JsonValue::Array(
+                    self.changed_paths
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.verification.is_empty() {
+            object.insert(
+                "verification".to_string(),
+                JsonValue::Array(
+                    self.verification
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.next_steps.is_empty() {
+            object.insert(
+                "next_steps".to_string(),
+                JsonValue::Array(
+                    self.next_steps
+                        .iter()
+                        .map(|value| JsonValue::String(value.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(snapshot) = &self.repo_snapshot_id {
+            object.insert(
+                "repo_snapshot_id".to_string(),
+                JsonValue::String(snapshot.clone()),
+            );
+        }
+        JsonValue::Object(object)
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| SessionError::Format("task_ledger must be an object".to_string()))?;
+        Ok(Self {
+            objective: bounded_optional_text(
+                object
+                    .get("objective")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string),
+            ),
+            constraints: normalize_string_list(object.get("constraints")),
+            decisions: normalize_string_list(object.get("decisions")),
+            relevant_paths: normalize_paths(normalize_string_list(object.get("relevant_paths"))),
+            changed_paths: normalize_paths(normalize_string_list(object.get("changed_paths"))),
+            verification: normalize_string_list(object.get("verification")),
+            next_steps: normalize_string_list(object.get("next_steps")),
+            repo_snapshot_id: bounded_optional_text(
+                object
+                    .get("repo_snapshot_id")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string),
+            ),
+        })
+    }
+}
+
 fn message_record(message: &ConversationMessage) -> JsonValue {
     let mut object = BTreeMap::new();
     object.insert("type".to_string(), JsonValue::String("message".to_string()));
@@ -1028,6 +1267,111 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn bounded_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            let max_chars = SessionTaskLedger::MAX_OBJECTIVE_CHARS;
+            let bounded = if trimmed.chars().count() > max_chars {
+                trimmed.chars().take(max_chars).collect::<String>()
+            } else {
+                trimmed.to_string()
+            };
+            Some(bounded)
+        }
+    })
+}
+
+fn normalize_string_list(value: Option<&JsonValue>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(array) = value.and_then(JsonValue::as_array) else {
+        return out;
+    };
+    for item in array {
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        let normalized = text.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let bounded = if normalized.chars().count() > SessionTaskLedger::MAX_ITEM_CHARS {
+            normalized
+                .chars()
+                .take(SessionTaskLedger::MAX_ITEM_CHARS)
+                .collect::<String>()
+        } else {
+            normalized.to_string()
+        };
+        if !out.iter().any(|existing| existing == &bounded) {
+            out.push(bounded);
+        }
+        if out.len() >= SessionTaskLedger::MAX_ITEMS_PER_FIELD {
+            break;
+        }
+    }
+    out
+}
+
+fn normalize_paths(paths: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in paths {
+        let normalized = normalize_single_path(&path);
+        if normalized.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+        if out.len() >= SessionTaskLedger::MAX_ITEMS_PER_FIELD {
+            break;
+        }
+    }
+    out
+}
+
+fn normalize_single_path(path: &str) -> String {
+    let trimmed = path.trim().replace('\\', "/");
+    let trimmed = trimmed.trim_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.chars().count() > SessionTaskLedger::MAX_ITEM_CHARS {
+        trimmed
+            .chars()
+            .take(SessionTaskLedger::MAX_ITEM_CHARS)
+            .collect::<String>()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn extend_bounded_unique(target: &mut Vec<String>, incoming: Vec<String>) {
+    for value in incoming {
+        let normalized = value.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let bounded = if normalized.chars().count() > SessionTaskLedger::MAX_ITEM_CHARS {
+            normalized
+                .chars()
+                .take(SessionTaskLedger::MAX_ITEM_CHARS)
+                .collect::<String>()
+        } else {
+            normalized.to_string()
+        };
+        if !target.iter().any(|existing| existing == &bounded) {
+            target.push(bounded);
+        }
+        if target.len() > SessionTaskLedger::MAX_ITEMS_PER_FIELD {
+            let overflow = target.len() - SessionTaskLedger::MAX_ITEMS_PER_FIELD;
+            target.drain(0..overflow);
+        }
+    }
 }
 
 fn current_time_millis() -> u64 {
@@ -1259,6 +1603,25 @@ mod tests {
     }
 
     #[test]
+    fn persists_multiline_prompt_history_entries_verbatim() {
+        let path = temp_session_path("prompt-history-multiline");
+        let mut session = Session::new().with_persistence_path(path.clone());
+        session
+            .save_to_path(&path)
+            .expect("initial save should succeed");
+        let prompt = "line one\nline two\nline three";
+        session
+            .push_prompt_entry(prompt)
+            .expect("prompt history append should succeed");
+
+        let restored = Session::load_from_path(&path).expect("session should replay from jsonl");
+        fs::remove_file(&path).expect("temp file should be removable");
+
+        assert_eq!(restored.prompt_history.len(), 1);
+        assert_eq!(restored.prompt_history[0].text, prompt);
+    }
+
+    #[test]
     fn persists_compaction_metadata() {
         let path = temp_session_path("compaction");
         let mut session = Session::new();
@@ -1448,6 +1811,42 @@ mod tests {
         // then
         assert_eq!(restored.workspace_root(), Some(workspace_root.as_path()));
         assert_eq!(forked.workspace_root(), Some(workspace_root.as_path()));
+    }
+
+    #[test]
+    fn persists_task_ledger_across_save_load_and_fork() {
+        let path = temp_session_path("task-ledger");
+        let mut session = Session::new();
+        session
+            .set_task_objective("Implement repo intelligence")
+            .expect("objective should persist");
+        session
+            .update_task_ledger(super::SessionTaskLedgerUpdate {
+                constraints: vec!["keep single agent loop".to_string()],
+                decisions: vec!["use rust-native index".to_string()],
+                relevant_paths: vec!["rust/crates/repo-intel/src/lib.rs".to_string()],
+                changed_paths: vec!["rust/crates/tools/src/lib.rs".to_string()],
+                verification: vec!["cargo check --workspace".to_string()],
+                next_steps: vec!["add compaction ledger tests".to_string()],
+                repo_snapshot_id: Some("snapshot-123".to_string()),
+                ..Default::default()
+            })
+            .expect("ledger update should persist");
+        session.save_to_path(&path).expect("save should succeed");
+
+        let restored = Session::load_from_path(&path).expect("load should succeed");
+        let forked = restored.fork(Some("ledger-fork".to_string()));
+        fs::remove_file(path).expect("temp file should be removable");
+
+        assert_eq!(
+            restored.task_ledger().objective.as_deref(),
+            Some("Implement repo intelligence")
+        );
+        assert!(restored
+            .task_ledger()
+            .changed_paths
+            .contains(&"rust/crates/tools/src/lib.rs".to_string()));
+        assert_eq!(restored.task_ledger(), forked.task_ledger());
     }
 
     fn temp_session_path(label: &str) -> PathBuf {

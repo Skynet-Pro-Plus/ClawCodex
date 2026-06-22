@@ -1,12 +1,22 @@
 use std::fs;
+use std::io::Read as _;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Upper bound on a single `claw` invocation. A healthy compact run finishes in
+/// well under a second; this only fires when the child wedges (e.g. a failed
+/// mock connection), so it converts a hang into a clean failure instead of an
+/// orphaned process that stalls the whole `cargo test --workspace` run.
+const CLAW_TIMEOUT: Duration = Duration::from_secs(60);
+/// Grace period to drain the child's pipes once it has exited.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 #[test]
 fn compact_flag_prints_only_final_assistant_text_without_tool_call_details() {
@@ -141,9 +151,122 @@ fn run_claw(
         .env("CLAW_CONFIG_HOME", config_home)
         .env("HOME", home)
         .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args(args);
-    command.output().expect("claw should launch")
+        .env("PATH", inherited_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    forward_windows_runtime_env(&mut command);
+    command.args(args);
+    run_with_timeout(command, CLAW_TIMEOUT)
+}
+
+/// On Windows the child needs a usable `PATH` to resolve `git`/`sh.exe`; a
+/// hard-coded Unix `PATH` leaves it unable to find those tools. Inherit the
+/// harness `PATH` instead, falling back to the POSIX default elsewhere.
+fn inherited_path() -> String {
+    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string())
+}
+
+/// Forward the Windows variables that core runtime initialisation depends on.
+///
+/// `.env_clear()` strips `SystemRoot`/`SystemDrive`, but Windows needs
+/// `SystemRoot` to locate system DLLs; without it the child aborts during
+/// crypto/socket initialisation (`getrandom` -> `abort`,
+/// `STATUS_ILLEGAL_INSTRUCTION`) before it can emit a single byte. Outside
+/// Windows these variables are absent and this is a no-op.
+fn forward_windows_runtime_env(command: &mut Command) {
+    for name in ["SystemRoot", "SystemDrive"] {
+        if let Ok(value) = std::env::var(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+/// Spawn `command`, draining stdout/stderr on background threads and waiting at
+/// most `timeout` for exit. On timeout the whole child process tree is killed
+/// so a wedged `claw` (or a grandchild holding the stdout pipe) can never be
+/// orphaned or stall the test binary.
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    let child = command.spawn().expect("claw should launch");
+    let mut guard = KillOnDrop(child);
+
+    let mut stdout_pipe = guard.0.stdout.take().expect("stdout pipe");
+    let mut stderr_pipe = guard.0.stderr.take().expect("stderr pipe");
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        let _ = stdout_tx.send(buffer);
+    });
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        let _ = stderr_tx.send(buffer);
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = guard.0.try_wait().expect("failed polling claw process") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let pid = guard.0.id();
+            kill_process_tree(pid);
+            drop(guard);
+            panic!(
+                "claw did not exit within {timeout:?}; killed process tree (pid {pid}) \
+                 to avoid orphaning it.\nstdout so far:\n{}\nstderr so far:\n{}",
+                String::from_utf8_lossy(&drain(&stdout_rx)),
+                String::from_utf8_lossy(&drain(&stderr_rx)),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    // The child has exited; its pipe write ends should close promptly. Bound the
+    // drain so a lingering grandchild handle cannot reintroduce a hang.
+    let stdout = stdout_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    let stderr = stderr_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+fn drain(receiver: &mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default()
+}
+
+/// Best-effort kill of a process and all of its descendants. `Child::kill`
+/// alone does not reap grandchildren on Windows.
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill")
+            .args(["-9", "-P", &pid.to_string()])
+            .status();
+    }
+}
+
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

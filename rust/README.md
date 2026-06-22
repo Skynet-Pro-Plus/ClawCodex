@@ -79,8 +79,10 @@ cargo run -p mock-anthropic-service -- --bind 127.0.0.1:0
 
 ## Verification
 
+This workspace pins Rust in [`rust-toolchain.toml`](rust-toolchain.toml); install with `rustup` so local builds and CI use the same compiler.
+
 ```bash
-cargo fmt
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```

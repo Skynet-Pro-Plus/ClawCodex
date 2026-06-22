@@ -1,4 +1,5 @@
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use serde_json::Value;
 
 const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n";
@@ -180,7 +181,11 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
     let summary =
         merge_compact_summaries(existing_summary.as_deref(), &summarize_messages(removed));
     let formatted_summary = format_compact_summary(&summary);
-    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    let mut continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    if let Some(ledger_section) = render_task_ledger_section(session) {
+        continuation.push_str("\n\n");
+        continuation.push_str(&ledger_section);
+    }
 
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::System,
@@ -201,6 +206,49 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
     }
 }
 
+fn render_task_ledger_section(session: &Session) -> Option<String> {
+    let ledger = session.task_ledger();
+    if ledger.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["Task ledger:".to_string()];
+    if let Some(objective) = &ledger.objective {
+        lines.push(format!("- Objective: {objective}"));
+    }
+    if !ledger.constraints.is_empty() {
+        lines.push("- Constraints:".to_string());
+        lines.extend(ledger.constraints.iter().map(|item| format!("  - {item}")));
+    }
+    if !ledger.decisions.is_empty() {
+        lines.push("- Decisions:".to_string());
+        lines.extend(ledger.decisions.iter().map(|item| format!("  - {item}")));
+    }
+    if !ledger.relevant_paths.is_empty() {
+        lines.push(format!(
+            "- Relevant paths: {}",
+            ledger.relevant_paths.join(", ")
+        ));
+    }
+    if !ledger.changed_paths.is_empty() {
+        lines.push(format!(
+            "- Changed paths: {}",
+            ledger.changed_paths.join(", ")
+        ));
+    }
+    if !ledger.verification.is_empty() {
+        lines.push("- Verification evidence:".to_string());
+        lines.extend(ledger.verification.iter().map(|item| format!("  - {item}")));
+    }
+    if !ledger.next_steps.is_empty() {
+        lines.push("- Next steps:".to_string());
+        lines.extend(ledger.next_steps.iter().map(|item| format!("  - {item}")));
+    }
+    if let Some(snapshot) = &ledger.repo_snapshot_id {
+        lines.push(format!("- Repo snapshot id: {snapshot}"));
+    }
+    Some(lines.join("\n"))
+}
+
 fn compacted_summary_prefix_len(session: &Session) -> usize {
     usize::from(
         session
@@ -211,6 +259,7 @@ fn compacted_summary_prefix_len(session: &Session) -> usize {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn summarize_messages(messages: &[ConversationMessage]) -> String {
     let user_messages = messages
         .iter()
@@ -267,6 +316,75 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
     if !pending_work.is_empty() {
         lines.push("- Pending work:".to_string());
         lines.extend(pending_work.into_iter().map(|item| format!("  - {item}")));
+    }
+
+    let user_intent = collect_user_intent(messages);
+    if let Some(latest_request) = &user_intent.latest_request {
+        lines.push(format!(
+            "- Latest complete user request: {}",
+            truncate_summary(latest_request, 300)
+        ));
+    }
+    if !user_intent.requested_paths.is_empty() {
+        lines.push(format!(
+            "- Explicit requested paths: {}.",
+            user_intent.requested_paths.join(", ")
+        ));
+    }
+    if !user_intent.constraints.is_empty() {
+        lines.push("- Explicit constraints/prohibitions:".to_string());
+        lines.extend(
+            user_intent
+                .constraints
+                .iter()
+                .map(|line| format!("  - {}", truncate_summary(line, 200))),
+        );
+    }
+    if !user_intent.acceptance_criteria.is_empty() {
+        lines.push("- Acceptance criteria cues:".to_string());
+        lines.extend(
+            user_intent
+                .acceptance_criteria
+                .iter()
+                .map(|line| format!("  - {}", truncate_summary(line, 200))),
+        );
+    }
+
+    let tool_evidence = collect_tool_evidence(messages);
+    if !tool_evidence.successful_paths.is_empty() {
+        lines.push(format!(
+            "- Verified filesystem writes/edits: {}.",
+            tool_evidence.successful_paths.join(", ")
+        ));
+    }
+    if !tool_evidence.failed_paths.is_empty() {
+        lines.push(format!(
+            "- Failed filesystem writes/edits (not verification): {}.",
+            tool_evidence.failed_paths.join(", ")
+        ));
+    }
+    let unresolved_paths = user_intent
+        .requested_paths
+        .iter()
+        .filter(|requested| {
+            !tool_evidence
+                .successful_paths
+                .iter()
+                .any(|written| normalized_path(written) == normalized_path(requested))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unresolved_paths.is_empty() {
+        lines.push(format!(
+            "- Pending required paths without matching write evidence: {}.",
+            unresolved_paths.join(", ")
+        ));
+    }
+    if !user_intent.requested_paths.is_empty() && tool_evidence.successful_paths.is_empty() {
+        lines.push(
+            "- Completion status remains unverified: assistant prose is not evidence without successful tool results."
+                .to_string(),
+        );
     }
 
     let key_files = collect_key_files(messages);
@@ -414,6 +532,20 @@ fn infer_current_work(messages: &[ConversationMessage]) -> Option<String> {
         .map(|text| truncate_summary(text, 200))
 }
 
+#[derive(Debug, Default)]
+struct UserIntentSnapshot {
+    latest_request: Option<String>,
+    requested_paths: Vec<String>,
+    constraints: Vec<String>,
+    acceptance_criteria: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct ToolEvidenceSnapshot {
+    successful_paths: Vec<String>,
+    failed_paths: Vec<String>,
+}
+
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
     message.blocks.iter().find_map(|block| match block {
         ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
@@ -430,6 +562,7 @@ fn has_interesting_extension(candidate: &str) -> bool {
         .is_some_and(|extension| {
             ["rs", "ts", "tsx", "js", "json", "md"]
                 .iter()
+                .chain(["html", "css", "py"].iter())
                 .any(|expected| extension.eq_ignore_ascii_case(expected))
         })
 }
@@ -441,13 +574,119 @@ fn extract_file_candidates(content: &str) -> Vec<String> {
             let candidate = token.trim_matches(|char: char| {
                 matches!(char, ',' | '.' | ':' | ';' | ')' | '(' | '"' | '\'' | '`')
             });
-            if candidate.contains('/') && has_interesting_extension(candidate) {
+            if (candidate.contains('/') || candidate.contains('\\'))
+                && has_interesting_extension(candidate)
+            {
                 Some(candidate.to_string())
             } else {
                 None
             }
         })
         .collect()
+}
+
+fn collect_user_intent(messages: &[ConversationMessage]) -> UserIntentSnapshot {
+    let mut snapshot = UserIntentSnapshot::default();
+    for message in messages {
+        if message.role != MessageRole::User {
+            continue;
+        }
+        for block in &message.blocks {
+            let ContentBlock::Text { text } = block else {
+                continue;
+            };
+            if !text.trim().is_empty() {
+                snapshot.latest_request = Some(text.clone());
+            }
+            for path in extract_file_candidates(text) {
+                if !snapshot
+                    .requested_paths
+                    .iter()
+                    .any(|existing| existing == &path)
+                {
+                    snapshot.requested_paths.push(path);
+                }
+            }
+            for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                let lowered = line.to_ascii_lowercase();
+                if (lowered.contains("do not")
+                    || lowered.contains("no external")
+                    || lowered.contains("html only")
+                    || lowered.contains("only ")
+                    || lowered.contains("without "))
+                    && !snapshot.constraints.iter().any(|existing| existing == line)
+                {
+                    snapshot.constraints.push(line.to_string());
+                }
+                if (lowered.contains("acceptance criteria")
+                    || lowered.starts_with("- ")
+                    || lowered.starts_with("* ")
+                    || lowered.contains("must "))
+                    && !snapshot
+                        .acceptance_criteria
+                        .iter()
+                        .any(|existing| existing == line)
+                {
+                    snapshot.acceptance_criteria.push(line.to_string());
+                }
+            }
+        }
+    }
+    snapshot
+}
+
+fn collect_tool_evidence(messages: &[ConversationMessage]) -> ToolEvidenceSnapshot {
+    let mut snapshot = ToolEvidenceSnapshot::default();
+    for message in messages {
+        for block in &message.blocks {
+            let ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if !matches!(tool_name.as_str(), "write_file" | "edit_file") {
+                continue;
+            }
+            let Some(path) = extract_path_from_tool_output(output) else {
+                continue;
+            };
+            if *is_error {
+                if !snapshot
+                    .failed_paths
+                    .iter()
+                    .any(|existing| existing == &path)
+                {
+                    snapshot.failed_paths.push(path);
+                }
+            } else if !snapshot
+                .successful_paths
+                .iter()
+                .any(|existing| existing == &path)
+            {
+                snapshot.successful_paths.push(path);
+            }
+        }
+    }
+    snapshot
+}
+
+fn extract_path_from_tool_output(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    let object = value.as_object()?;
+    for key in ["path", "file_path", "filePath", "target_path", "targetPath"] {
+        if let Some(path) = object.get(key).and_then(Value::as_str) {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+fn normalized_path(path: &str) -> String {
+    path.replace('\\', "/").trim().to_ascii_lowercase()
 }
 
 fn truncate_summary(content: &str, max_chars: usize) -> String {
@@ -574,7 +813,8 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
 mod tests {
     use super::{
         collect_key_files, compact_session, estimate_api_request_tokens, format_compact_summary,
-        get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
+        get_compact_continuation_message, infer_pending_work, should_compact, summarize_messages,
+        CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
@@ -849,5 +1089,84 @@ mod tests {
         let est_sys =
             estimate_api_request_tokens(&["alpha".to_string(), "beta".to_string()], &messages);
         assert!(est_sys > est_empty);
+    }
+
+    #[test]
+    fn compact_continuation_includes_task_ledger_once() {
+        let mut session = Session::new();
+        session
+            .set_task_objective("Finish handoff plan")
+            .expect("objective set");
+        session
+            .update_task_ledger(crate::session::SessionTaskLedgerUpdate {
+                changed_paths: vec!["rust/crates/runtime/src/compact.rs".to_string()],
+                verification: vec!["cargo check --workspace".to_string()],
+                ..Default::default()
+            })
+            .expect("ledger update");
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "recent".to_string(),
+            }]),
+        ];
+
+        let result = compact_session(
+            &session,
+            CompactionConfig {
+                preserve_recent_messages: 1,
+                max_estimated_tokens: 1,
+            },
+        );
+        let ContentBlock::Text { text } = &result.compacted_session.messages[0].blocks[0] else {
+            panic!("expected system continuation text");
+        };
+        assert_eq!(text.matches("Task ledger:").count(), 1);
+        assert!(text.contains("Finish handoff plan"));
+        assert!(text.contains("cargo check --workspace"));
+    }
+
+    #[test]
+    fn compaction_summary_preserves_user_html_path_constraints_and_pending_status() {
+        let summary = summarize_messages(&[
+            ConversationMessage::user_text(
+                "Build Pac-Man in D:\\ClawCodex\\games\\pacman.html.\nHTML/CSS/JavaScript only.\nNo external dependencies.\nAcceptance criteria: responsive controls and score display.",
+            ),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Implemented in Python at games/pacman.py".to_string(),
+            }]),
+            ConversationMessage::tool_result(
+                "tool-1",
+                "write_file",
+                r#"{"path":"games/pacman.py","size":128}"#,
+                false,
+            ),
+        ]);
+        let formatted = format_compact_summary(&summary);
+        assert!(formatted.contains("D:\\ClawCodex\\games\\pacman.html"));
+        assert!(formatted.contains("HTML/CSS/JavaScript only"));
+        assert!(formatted.contains("No external dependencies"));
+        assert!(formatted.contains("games/pacman.py"));
+        assert!(formatted.contains("Pending required paths without matching write evidence"));
+    }
+
+    #[test]
+    fn failed_tool_output_is_not_counted_as_verified_write_evidence() {
+        let summary = summarize_messages(&[
+            ConversationMessage::user_text("Write games/pacman.html"),
+            ConversationMessage::tool_result(
+                "tool-1",
+                "write_file",
+                r#"{"path":"games/pacman.html","error":"denied"}"#,
+                true,
+            ),
+        ]);
+        let formatted = format_compact_summary(&summary);
+        assert!(formatted.contains("Failed filesystem writes/edits"));
+        assert!(formatted.contains("Completion status remains unverified"));
+        assert!(formatted.contains("Pending required paths without matching write evidence"));
     }
 }

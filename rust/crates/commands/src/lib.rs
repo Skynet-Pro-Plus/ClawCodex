@@ -65,6 +65,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: true,
     },
     SlashCommandSpec {
+        name: "order",
+        aliases: &[],
+        summary: "Capture a multiline prompt until /end",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
         name: "status",
         aliases: &[],
         summary: "Show current session status",
@@ -1039,6 +1046,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
     Help,
+    Order,
     Status,
     Sandbox,
     Compact,
@@ -1215,6 +1223,7 @@ impl SlashCommand {
     pub fn slash_name(&self) -> &'static str {
         match self {
             Self::Help => "/help",
+            Self::Order => "/order",
             Self::Clear { .. } => "/clear",
             Self::Compact { .. } => "/compact",
             Self::Cost => "/cost",
@@ -1310,6 +1319,10 @@ pub fn validate_slash_command_input(
         "help" => {
             validate_no_args(command, &args)?;
             SlashCommand::Help
+        }
+        "order" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Order
         }
         "status" => {
             validate_no_args(command, &args)?;
@@ -4045,6 +4058,7 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
+        | SlashCommand::Order
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Commit
         | SlashCommand::Pr { .. }
@@ -4240,6 +4254,7 @@ mod tests {
     #[test]
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Ok(Some(SlashCommand::Help)));
+        assert_eq!(SlashCommand::parse("/order"), Ok(Some(SlashCommand::Order)));
         assert_eq!(
             SlashCommand::parse(" /status "),
             Ok(Some(SlashCommand::Status))
@@ -4647,7 +4662,7 @@ mod tests {
         assert!(help.contains("aliases: /skill"));
         assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 139);
+        assert_eq!(slash_command_specs().len(), 140);
         assert!(resume_supported_slash_commands().len() >= 39);
     }
 

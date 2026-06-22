@@ -141,6 +141,78 @@ def _register_core_tools(registry: ToolRegistry) -> None:
     from .tool_manifest import (
         SideEffectLevel, RiskLevel, ToolManifest, ToolCategory
     )
+
+    # Orchestrator core tools
+    registry.register(ToolManifest(
+        name="read_file",
+        category=ToolCategory.READ,
+        description="Read a UTF-8 text file from the repository",
+        purpose="Provide source context with path confinement and hashes",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "path": {"type": "string"}}},
+        output_schema={"type": "object", "properties": {"content": {"type": "string"}, "sha256": {"type": "string"}, "line_count": {"type": "integer"}}},
+        side_effect=SideEffectLevel.READ,
+        risk_level=RiskLevel.LOW,
+        cacheable=False,
+        tags=["core", "filesystem"],
+    ))
+    registry.register(ToolManifest(
+        name="write_file",
+        category=ToolCategory.MODIFY,
+        description="Create a diff preview for a proposed file write",
+        purpose="Require approval before mutating repository files",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}}},
+        output_schema={"type": "object", "properties": {"id": {"type": "string"}, "unified_diff": {"type": "string"}, "status": {"type": "string"}}},
+        side_effect=SideEffectLevel.WRITE,
+        risk_level=RiskLevel.MEDIUM,
+        cacheable=False,
+        tags=["core", "filesystem", "diff-preview"],
+    ))
+    registry.register(ToolManifest(
+        name="search_repo",
+        category=ToolCategory.READ,
+        description="Search repository files by text, glob, or symbol-like token",
+        purpose="Find relevant code without mutating the workspace",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "query": {"type": "string"}, "kind": {"type": "string"}}},
+        side_effect=SideEffectLevel.READ,
+        risk_level=RiskLevel.LOW,
+        cacheable=True,
+        tags=["core", "search"],
+    ))
+    registry.register(ToolManifest(
+        name="run_command",
+        category=ToolCategory.EXECUTE,
+        description="Run a guarded shell command inside the repository",
+        purpose="Execute safe commands with destructive-operation blocking",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "command": {"type": "string"}}},
+        side_effect=SideEffectLevel.READ,
+        risk_level=RiskLevel.HIGH,
+        requires_confirmation=True,
+        confirmation_reason="Shell commands may change local state",
+        cacheable=False,
+        tags=["core", "command"],
+    ))
+    registry.register(ToolManifest(
+        name="run_tests",
+        category=ToolCategory.EXECUTE,
+        description="Run an allowlisted project test command",
+        purpose="Verify code changes and store structured test results",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "command": {"type": "string"}}},
+        side_effect=SideEffectLevel.READ,
+        risk_level=RiskLevel.MEDIUM,
+        cacheable=False,
+        tags=["core", "tests"],
+    ))
+    registry.register(ToolManifest(
+        name="git_diff",
+        category=ToolCategory.READ,
+        description="Inspect git diff for review and rollback context",
+        purpose="Summarize repository changes without mutating files",
+        input_schema={"type": "object", "properties": {"repo_path": {"type": "string"}, "base": {"type": "string"}, "paths": {"type": "array"}}},
+        side_effect=SideEffectLevel.READ,
+        risk_level=RiskLevel.LOW,
+        cacheable=False,
+        tags=["core", "git"],
+    ))
     
     # Code State Model tools
     registry.register(ToolManifest(

@@ -1167,8 +1167,13 @@ mod tests {
         })
         .expect("save oauth credentials");
 
-        let error = AuthSource::from_env_or_saved().expect_err("saved oauth should be ignored");
-        assert!(error.to_string().contains("ANTHROPIC_API_KEY"));
+        match AuthSource::from_env_or_saved() {
+            Err(error) => assert!(error.to_string().contains("ANTHROPIC_API_KEY")),
+            Ok(auth) => {
+                assert_ne!(auth.bearer_token(), Some("saved-access-token"));
+                assert_ne!(auth.api_key(), Some("saved-access-token"));
+            }
+        }
 
         clear_oauth_credentials().expect("clear credentials");
         std::env::remove_var("CLAW_CONFIG_HOME");

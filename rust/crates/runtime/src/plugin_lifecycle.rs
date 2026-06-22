@@ -296,7 +296,7 @@ mod tests {
             status: ServerStatus::Healthy,
             capabilities: capabilities
                 .iter()
-                .map(|capability| capability.to_string())
+                .map(|capability| (*capability).to_string())
                 .collect(),
             last_error: None,
         }
@@ -308,7 +308,7 @@ mod tests {
             status: ServerStatus::Failed,
             capabilities: capabilities
                 .iter()
-                .map(|capability| capability.to_string())
+                .map(|capability| (*capability).to_string())
                 .collect(),
             last_error: Some(error.to_string()),
         }
@@ -320,7 +320,7 @@ mod tests {
             status: ServerStatus::Degraded,
             capabilities: capabilities
                 .iter()
-                .map(|capability| capability.to_string())
+                .map(|capability| (*capability).to_string())
                 .collect(),
             last_error: Some(error.to_string()),
         }

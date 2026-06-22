@@ -193,30 +193,46 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_OPENAI_BASE_URL,
         });
     }
-    // Alibaba DashScope compatible-mode endpoint. Routes qwen/* and bare
-    // qwen-* model names (qwen-max, qwen-plus, qwen-turbo, qwen-qwq, etc.)
-    // to the OpenAI-compat client pointed at DashScope's /compatible-mode/v1.
-    // Uses the OpenAi provider kind because DashScope speaks the OpenAI REST
-    // shape — only the base URL and auth env var differ.
-    if canonical.starts_with("qwen/") || canonical.starts_with("qwen-") {
-        return Some(ProviderMetadata {
-            provider: ProviderKind::OpenAi,
-            auth_env: "DASHSCOPE_API_KEY",
-            base_url_env: "DASHSCOPE_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
-        });
-    }
-    // Kimi models (kimi-k2.5, kimi-k1.5, etc.) via DashScope compatible-mode.
-    // Routes kimi/* and kimi-* model names to DashScope endpoint.
-    if canonical.starts_with("kimi/") || canonical.starts_with("kimi-") {
-        return Some(ProviderMetadata {
-            provider: ProviderKind::OpenAi,
-            auth_env: "DASHSCOPE_API_KEY",
-            base_url_env: "DASHSCOPE_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
-        });
+    // Alibaba DashScope compatible-mode endpoint. Routes qwen/* / qwen-* and
+    // kimi/* / kimi-* model names to the OpenAI-compat client pointed at
+    // DashScope's /compatible-mode/v1 — but only when the user actually holds
+    // DashScope credentials (or has no OpenAI-compat endpoint configured, so
+    // the DashScope error message stays the most helpful one). OpenRouter
+    // lists models under the same ids (e.g. qwen/qwen3.6-35b-a3b), and a user
+    // configured for OpenRouter must not be told to export DASHSCOPE_API_KEY.
+    if canonical.starts_with("qwen/")
+        || canonical.starts_with("qwen-")
+        || canonical.starts_with("kimi/")
+        || canonical.starts_with("kimi-")
+    {
+        if prefer_vendor_route(
+            openai_compat::has_api_key("DASHSCOPE_API_KEY"),
+            openai_compat_configured(),
+        ) {
+            return Some(ProviderMetadata {
+                provider: ProviderKind::OpenAi,
+                auth_env: "DASHSCOPE_API_KEY",
+                base_url_env: "DASHSCOPE_BASE_URL",
+                default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
+            });
+        }
+        // No DashScope key and an OpenAI-compatible endpoint (OpenRouter,
+        // local server) is configured: fall through so it serves the model.
+        return None;
     }
     None
+}
+
+/// True when the user configured a generic OpenAI-compatible endpoint
+/// (`OpenRouter`, `OpenAI`, or a local server) via key or base URL.
+fn openai_compat_configured() -> bool {
+    openai_compat::has_api_key("OPENAI_API_KEY") || openai_compat::has_api_key("OPENAI_BASE_URL")
+}
+
+/// Vendor-prefix routing wins only when that vendor's key is present, or when
+/// no generic OpenAI-compatible endpoint exists to serve the model instead.
+const fn prefer_vendor_route(vendor_key_present: bool, openai_compat_configured: bool) -> bool {
+    vendor_key_present || !openai_compat_configured
 }
 
 #[must_use]
@@ -452,21 +468,12 @@ pub(crate) fn load_dotenv_file(
     Some(parse_dotenv(&content))
 }
 
-/// Look up `key` in a `.env` file, preferring the current working directory,
-/// then the directory containing the running executable (portable installs).
+/// Look up `key` in a `.env` file, preferring the repo root when it can be
+/// resolved, then the current working directory and executable directory.
 ///
 /// Returns `None` when no file contains a non-empty value for `key`.
 pub(crate) fn dotenv_value(key: &str) -> Option<String> {
-    let mut paths = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd.join(".env"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join(".env"));
-        }
-    }
-    for path in paths {
+    for path in dotenv_candidate_paths() {
         let Some(values) = load_dotenv_file(&path) else {
             continue;
         };
@@ -475,6 +482,41 @@ pub(crate) fn dotenv_value(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn dotenv_candidate_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(root) = explicit_or_discovered_repo_root() {
+        paths.push(root.join(".env"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        paths.push(cwd.join(".env"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join(".env"));
+        }
+    }
+
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn explicit_or_discovered_repo_root() -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("CLAW_REPO_ROOT").map(std::path::PathBuf::from) {
+        if root.is_dir() {
+            return Some(root);
+        }
+    }
+    let cwd = std::env::current_dir().ok()?;
+    cwd.ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+        .map(std::path::Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -536,6 +578,35 @@ mod tests {
         }
     }
 
+    struct EmptyRepoRootGuard {
+        _env: EnvVarGuard,
+        path: std::path::PathBuf,
+    }
+
+    impl EmptyRepoRootGuard {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "api-empty-repo-root-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_nanos())
+            ));
+            std::fs::create_dir_all(&path).expect("create empty repo root");
+            let path_string = path.to_string_lossy().into_owned();
+            Self {
+                _env: EnvVarGuard::set("CLAW_REPO_ROOT", Some(&path_string)),
+                path,
+            }
+        }
+    }
+
+    impl Drop for EmptyRepoRootGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     #[test]
     fn resolves_grok_aliases() {
         assert_eq!(resolve_model_alias("grok"), "grok-3");
@@ -575,55 +646,48 @@ mod tests {
     }
 
     #[test]
-    fn qwen_prefix_routes_to_dashscope_not_anthropic() {
-        // User request from Discord #clawcode-get-help: web3g wants to use
-        // Qwen 3.6 Plus via native Alibaba DashScope API (not OpenRouter,
-        // which has lower rate limits). metadata_for_model must route
-        // qwen/* and bare qwen-* to the OpenAi provider kind pointed at
-        // the DashScope compatible-mode endpoint, regardless of whether
-        // ANTHROPIC_API_KEY is present in the environment.
-        let meta = super::metadata_for_model("qwen/qwen-max")
-            .expect("qwen/ prefix must resolve to DashScope metadata");
-        assert_eq!(meta.provider, ProviderKind::OpenAi);
-        assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
-        assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
-
-        // Bare qwen- prefix also routes
-        let meta2 = super::metadata_for_model("qwen-plus")
-            .expect("qwen- prefix must resolve to DashScope metadata");
-        assert_eq!(meta2.provider, ProviderKind::OpenAi);
-        assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
-
-        // detect_provider_kind must agree even if ANTHROPIC_API_KEY is set
-        let kind = detect_provider_kind("qwen/qwen3-coder");
-        assert_eq!(
-            kind,
-            ProviderKind::OpenAi,
-            "qwen/ prefix must win over auth-sniffer order"
-        );
+    fn vendor_prefix_routing_is_credential_aware() {
+        // Vendor key present: vendor route always wins (the original Discord
+        // request — native DashScope despite OpenRouter also being usable).
+        assert!(super::prefer_vendor_route(true, true));
+        assert!(super::prefer_vendor_route(true, false));
+        // Nothing else configured: keep the vendor route so the error message
+        // names the right env var (DASHSCOPE_API_KEY).
+        assert!(super::prefer_vendor_route(false, false));
+        // OpenRouter/OpenAI-compat configured and no vendor key: the generic
+        // endpoint serves the model; never demand DASHSCOPE_API_KEY.
+        assert!(!super::prefer_vendor_route(false, true));
     }
 
     #[test]
-    fn kimi_prefix_routes_to_dashscope() {
-        // Kimi models via DashScope (kimi-k2.5, kimi-k1.5, etc.)
-        let meta = super::metadata_for_model("kimi-k2.5")
-            .expect("kimi-k2.5 must resolve to DashScope metadata");
-        assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
-        assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
-        assert_eq!(meta.provider, ProviderKind::OpenAi);
-
-        // With provider prefix
-        let meta2 = super::metadata_for_model("kimi/kimi-k2.5")
-            .expect("kimi/kimi-k2.5 must resolve to DashScope metadata");
-        assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
-        assert_eq!(meta2.provider, ProviderKind::OpenAi);
-
-        // Different kimi variants
-        let meta3 = super::metadata_for_model("kimi-k1.5")
-            .expect("kimi-k1.5 must resolve to DashScope metadata");
-        assert_eq!(meta3.auth_env, "DASHSCOPE_API_KEY");
+    fn qwen_and_kimi_route_by_available_credentials() {
+        // Ambient credentials decide the route, so hold the env lock and
+        // assert consistency with the live configuration instead of pinning
+        // one outcome.
+        let _guard = env_lock();
+        let dashscope = super::openai_compat::has_api_key("DASHSCOPE_API_KEY");
+        let compat = super::openai_compat_configured();
+        for model in ["qwen/qwen-max", "qwen-plus", "kimi-k2.5", "kimi/kimi-k2.5"] {
+            let meta = super::metadata_for_model(model);
+            if dashscope || !compat {
+                let meta = meta.unwrap_or_else(|| panic!("{model} must resolve to DashScope"));
+                assert_eq!(meta.provider, ProviderKind::OpenAi);
+                assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
+                assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
+                assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
+            } else {
+                assert!(
+                    meta.is_none(),
+                    "{model} must fall through to the configured OpenAI-compat endpoint"
+                );
+            }
+            // Either way the provider kind is OpenAI-compatible, never Anthropic.
+            assert_eq!(
+                detect_provider_kind(model),
+                ProviderKind::OpenAi,
+                "{model} must win over auth-sniffer order"
+            );
+        }
     }
 
     #[test]
@@ -919,9 +983,43 @@ NO_EQUALS_LINE
     }
 
     #[test]
+    fn openai_credentials_prefer_repo_dotenv_over_process_env() {
+        let _guard = env_lock();
+        let temp_root = std::env::temp_dir().join(format!(
+            "api-openai-dotenv-precedence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        std::fs::create_dir_all(&temp_root).expect("create temp dir");
+        std::fs::write(
+            temp_root.join(".env"),
+            "OPENAI_API_KEY=repo-key\nOPENAI_BASE_URL=https://openrouter.ai/api/v1\n",
+        )
+        .expect("write .env");
+        let repo_root = temp_root.to_string_lossy().into_owned();
+        let _repo_root = EnvVarGuard::set("CLAW_REPO_ROOT", Some(&repo_root));
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", Some("process-key"));
+        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("https://example.invalid/v1"));
+
+        assert_eq!(
+            super::openai_compat::read_openai_api_key().as_deref(),
+            Some("repo-key")
+        );
+        assert_eq!(
+            super::openai_compat::read_openai_base_url_explicit().as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn anthropic_missing_credentials_hint_is_none_when_no_foreign_creds_present() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("no-foreign-creds");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
         let _xai = EnvVarGuard::set("XAI_API_KEY", None);
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
@@ -940,6 +1038,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_hint_detects_openai_api_key_and_recommends_openai_prefix() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("openai-hint");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", Some("sk-openrouter-varleg"));
         let _xai = EnvVarGuard::set("XAI_API_KEY", None);
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
@@ -971,6 +1070,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_hint_detects_xai_api_key() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("xai-hint");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
         let _xai = EnvVarGuard::set("XAI_API_KEY", Some("xai-test-key"));
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
@@ -998,6 +1098,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_hint_detects_dashscope_api_key() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("dashscope-hint");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
         let _xai = EnvVarGuard::set("XAI_API_KEY", None);
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", Some("sk-dashscope-test"));
@@ -1025,6 +1126,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_hint_prefers_openai_when_multiple_foreign_creds_set() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("multi-foreign-hint");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", Some("sk-openrouter-varleg"));
         let _xai = EnvVarGuard::set("XAI_API_KEY", Some("xai-test-key"));
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", Some("sk-dashscope-test"));
@@ -1048,6 +1150,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_builds_error_with_canonical_env_vars_and_no_hint_when_clean() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("clean-missing-creds");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
         let _xai = EnvVarGuard::set("XAI_API_KEY", None);
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
@@ -1082,6 +1185,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_builds_error_with_hint_when_openai_key_is_set() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("openai-missing-creds");
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", Some("sk-openrouter-varleg"));
         let _xai = EnvVarGuard::set("XAI_API_KEY", None);
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", None);
@@ -1121,6 +1225,7 @@ NO_EQUALS_LINE
     fn anthropic_missing_credentials_hint_ignores_empty_string_values() {
         // given
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("empty-foreign-creds");
         // An empty value is semantically equivalent to "not set" for the
         // credential discovery path, so the sniffer must treat it that way
         // to avoid false-positive hints for users who intentionally cleared

@@ -1,7 +1,8 @@
 @echo off
 setlocal
-REM Run the packaged CLI from repo root (Command Prompt — no PowerShell).
-REM Ensures .env beside README.md is found and matches run-claw.ps1 cwd behavior.
+REM Run the packaged CLI from repo root (Command Prompt - no PowerShell).
+REM Windows-native only: claw.exe runs directly. WSL is never used or probed.
+REM Credentials live in repo-root .env (see USAGE.md); claw reads it from cwd.
 cd /d "%~dp0"
 set "EXE=%~dp0bin\windows\claw.exe"
 if not exist "%EXE%" (
@@ -11,3 +12,4 @@ if not exist "%EXE%" (
     exit /b 1
 )
 "%EXE%" %*
+exit /b %errorlevel%

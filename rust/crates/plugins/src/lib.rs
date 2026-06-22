@@ -306,7 +306,7 @@ impl PluginTool {
 
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
         let input_json = input.to_string();
-        let mut process = Command::new(&self.command);
+        let mut process = direct_or_script_command(&self.command);
         process
             .args(&self.args)
             .stdin(Stdio::piped())
@@ -350,6 +350,50 @@ impl PluginTool {
 
 fn default_tool_permission_label() -> String {
     "danger-full-access".to_string()
+}
+
+fn direct_or_script_command(command: &str) -> Command {
+    #[cfg(windows)]
+    if Path::new(command).is_file()
+        && Path::new(command)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sh"))
+    {
+        let mut process = Command::new(shell_program());
+        process.arg(command);
+        return process;
+    }
+    Command::new(command)
+}
+
+fn shell_program() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(configured) = std::env::var_os("CLAWD_SH") {
+            let configured = PathBuf::from(configured);
+            if configured.is_file() {
+                return configured;
+            }
+        }
+        if let Ok(output) = Command::new("git").arg("--exec-path").output() {
+            if output.status.success() {
+                let exec_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                if let Some(git_root) = exec_path.ancestors().nth(3) {
+                    let candidate = git_root.join("bin").join("sh.exe");
+                    if candidate.is_file() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let candidate = PathBuf::from(program_files).join("Git/bin/sh.exe");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("sh")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2084,15 +2128,9 @@ fn run_lifecycle_commands(
 
     for command in commands {
         let mut process = if Path::new(command).exists() {
-            if cfg!(windows) {
-                let mut process = Command::new("cmd");
-                process.arg("/C").arg(command);
-                process
-            } else {
-                let mut process = Command::new("sh");
-                process.arg(command);
-                process
-            }
+            let mut process = Command::new(shell_program());
+            process.arg(command);
+            process
         } else if cfg!(windows) {
             let mut process = Command::new("cmd");
             process.arg("/C").arg(command);

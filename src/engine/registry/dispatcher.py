@@ -53,7 +53,7 @@ class ToolExecutor:
         start_time = time.perf_counter()
         
         try:
-            result_data = self.handler(**arguments)
+            result_data = self.handler(**arguments, context=context)
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             
             return ToolResult(
@@ -273,7 +273,7 @@ class Dispatcher:
     
     def _default_handler(self, **kwargs: Any) -> Any:
         """Default handler when no implementation is registered."""
-        return {"status": "not_implemented", "arguments": kwargs}
+        raise NotImplementedError("tool has no registered implementation")
     
     def _check_permissions(
         self,
@@ -282,6 +282,26 @@ class Dispatcher:
         context: DispatchContext,
     ) -> ToolResult:
         """Check if tool execution is permitted."""
+        from ..safety.destructive_ops import SafetyPolicy, SafetyViolation
+
+        repo_path = arguments.get("repo_path") or (context.allowed_paths[0] if context.allowed_paths else ".")
+        policy = SafetyPolicy(
+            repo_path=repo_path,
+            allowed_paths=context.allowed_paths or [repo_path],
+            denied_paths=context.denied_paths or manifest.denied_paths or [".env", ".env.local", ".env.production"],
+        )
+        try:
+            for key in ("path", "file_path"):
+                if key in arguments and arguments[key]:
+                    if manifest.category.value == "modify":
+                        policy.check_write_path(arguments[key])
+                    else:
+                        policy.check_read_path(arguments[key])
+            if "command" in arguments and arguments["command"]:
+                policy.check_command(arguments["command"], confirmed=context.elevated_permissions)
+        except SafetyViolation as exc:
+            return ToolResult.permission_denied(manifest.name, str(exc))
+
         # Check tool-level restrictions
         if manifest.allowed_paths and context.allowed_paths:
             combined = set(manifest.allowed_paths) & set(context.allowed_paths)
@@ -405,8 +425,15 @@ def invoke_tool(
 
 def _register_default_implementations(dispatcher: Dispatcher) -> None:
     """Register default tool implementations."""
-    from ..state_model import StateModelIndex
-    
-    # Register a placeholder for state model build
-    # Real implementations will be in state_model module
-    pass
+    from ..tools.commands import run_command
+    from ..tools.filesystem import read_file, write_file
+    from ..tools.git import git_diff
+    from ..tools.search import search_repo
+    from ..tools.tests import run_tests
+
+    dispatcher.register_implementation("read_file", read_file)
+    dispatcher.register_implementation("write_file", write_file)
+    dispatcher.register_implementation("search_repo", search_repo)
+    dispatcher.register_implementation("run_command", run_command)
+    dispatcher.register_implementation("run_tests", run_tests)
+    dispatcher.register_implementation("git_diff", git_diff)

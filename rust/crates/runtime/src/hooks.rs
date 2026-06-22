@@ -692,7 +692,7 @@ fn bounded_hook_preview(value: &str) -> Option<String> {
     let mut preview = String::new();
     for (count, ch) in trimmed.chars().enumerate() {
         if count == HOOK_PREVIEW_CHAR_LIMIT {
-            preview.push('…');
+            preview.push_str("...");
             break;
         }
         match ch {
@@ -839,6 +839,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn allows_exit_code_zero_and_captures_stdout() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet("printf 'pre ok'")],
@@ -852,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn denies_exit_code_two() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet("printf 'blocked by hook'; exit 2")],
@@ -866,6 +868,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn propagates_other_non_zero_statuses_as_failures() {
         let runner = HookRunner::from_feature_config(&RuntimeFeatureConfig::default().with_hooks(
             RuntimeHookConfig::new(
@@ -888,6 +891,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn parses_pre_hook_permission_override_and_updated_input() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet(
@@ -909,6 +913,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn runs_post_tool_use_failure_hooks() {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -927,6 +932,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn stops_running_failure_hooks_after_failure() {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -955,6 +961,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn executes_hooks_in_configured_order() {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -974,6 +981,8 @@ mod tests {
             None,
             Some(&mut reporter),
         );
+        let first_hook = shell_snippet("printf 'first'");
+        let second_hook = shell_snippet("printf 'second'");
 
         // then
         assert_eq!(
@@ -987,7 +996,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'first'"
+            } if command == &first_hook
         ));
         assert!(matches!(
             &reporter.events[1],
@@ -995,7 +1004,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'first'"
+            } if command == &first_hook
         ));
         assert!(matches!(
             &reporter.events[2],
@@ -1003,7 +1012,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'second'"
+            } if command == &second_hook
         ));
         assert!(matches!(
             &reporter.events[3],
@@ -1011,11 +1020,12 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'second'"
+            } if command == &second_hook
         ));
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn stops_running_hooks_after_failure() {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -1040,6 +1050,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn malformed_nonempty_hook_output_reports_explicit_diagnostic_with_previews() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet(
@@ -1065,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires POSIX-compatible shell semantics")]
     fn abort_signal_cancels_long_running_hook_and_reports_progress() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet("sleep 5")],
@@ -1106,7 +1118,30 @@ mod tests {
 
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
-        script.replace('\'', "\"")
+        let powershell = match script {
+            "printf 'pre ok'" => "[Console]::Out.Write('pre ok')",
+            "printf 'blocked by hook'; exit 2" => "[Console]::Out.Write('blocked by hook'); exit 2",
+            "printf 'warning hook'; exit 1" => "[Console]::Out.Write('warning hook'); exit 1",
+            r#"printf '%s' '{"systemMessage":"updated","hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"hook ok","updatedInput":{"command":"git status"}}}'"# => r#"[Console]::Out.Write('{"systemMessage":"updated","hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"hook ok","updatedInput":{"command":"git status"}}}')"#,
+            "printf 'failure hook ran'" => "[Console]::Out.Write('failure hook ran')",
+            "printf 'broken failure hook'; exit 1" => {
+                "[Console]::Out.Write('broken failure hook'); exit 1"
+            }
+            "printf 'later failure hook'" => "[Console]::Out.Write('later failure hook')",
+            "printf 'first'" => "[Console]::Out.Write('first')",
+            "printf 'second'" => "[Console]::Out.Write('second')",
+            "printf 'broken'; exit 1" => "[Console]::Out.Write('broken'); exit 1",
+            "printf 'later'" => "[Console]::Out.Write('later')",
+            "printf '{not-json\nsecond line'; printf 'stderr warning' >&2; exit 1" => {
+                "[Console]::Out.Write(\"{not-json`nsecond line\"); [Console]::Error.Write('stderr warning'); exit 1"
+            }
+            "sleep 5" => "Start-Sleep -Seconds 5",
+            other => other,
+        };
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"{}\"",
+            powershell.replace('"', "\\\"")
+        )
     }
 
     #[cfg(not(windows))]

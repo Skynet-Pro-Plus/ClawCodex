@@ -2,16 +2,32 @@
 .env
 
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Local Python environment for the optional server surface (claw_bootstrap.ps1)
+.venv/
 archive/
 .omx/
 .clawd-agents/
+# Kilo local artifacts; keep config visible only when intentionally tracked
+.kilo/node_modules/
+.kilo/package.json
+.kilo/package-lock.json
+.kilo/pnpm-lock.yaml
+.kilo/bun.lock
+.kilo/yarn.lock
+.kilo/agent-manager.json
 # Claude Code local artifacts
 .claude/settings.local.json
 .claude/sessions/
 # Claw Code local artifacts
 .claw/settings.local.json
 .claw/sessions/
+.claw/attachments/
+.claw/checkpoints/
 .clawhip/
+.port_sessions/
 status-help.txt
 
 # Rust build output (also listed in rust/.gitignore); keep repo lean
@@ -21,3 +37,41 @@ rust/target/
 # bin/windows/claw.exe is committed so users can run without compiling.
 bin/windows/claw.exe.new
 bin/windows/claw.exe.bak
+bin/windows/claw.exe.*.bak
+
+# Windows redirect artifact (accidental `> nul` in repo root)
+/nul
+
+# Local Android SDK / build sandboxes (re-download or rebuild as needed)
+android-tools/
+android/
+pacman-android/
+labelsnap/
+games/
+*.apk
+
+# Demo / showcase HTML and one-off scripts (not part of claw.exe pipeline)
+ai-capabilities*.html
+clawcodex-showcase.html
+hello.html
+hi.html
+hello_world.html
+openrouter_chat.html
+pacman.html
+tool_overview.html
+gen.py
+generate_showcase.py
+get-pip.py
+_x.js
+hello_world_gui.py
+open-chat-ui.bat
+install_sdk.bat
+
+# Install / build logs
+*.log
+sdk_*.log
+pacman_build.log
+
+# Scratch suggestion files
+suggest.txt
+suggestions_*.txt

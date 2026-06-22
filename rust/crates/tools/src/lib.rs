@@ -9,6 +9,7 @@ use api::{
     StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use plugins::PluginTool;
+use repo_intel::{RepoIntelligence, RepoSearchInput};
 use reqwest::blocking::Client;
 use runtime::{
     check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
@@ -29,7 +30,7 @@ use runtime::{
     ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// Global task registry shared across tool invocations within a session.
 fn global_lsp_registry() -> &'static LspRegistry {
@@ -68,6 +69,32 @@ fn global_worker_registry() -> &'static WorkerRegistry {
     REGISTRY.get_or_init(WorkerRegistry::new)
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    workspace_root: PathBuf,
+    repo_intelligence: RepoIntelligence,
+}
+
+impl ToolExecutionContext {
+    pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, String> {
+        let repo_intelligence = RepoIntelligence::new(workspace_root)?;
+        Ok(Self {
+            workspace_root: repo_intelligence.workspace_root().to_path_buf(),
+            repo_intelligence,
+        })
+    }
+
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    #[must_use]
+    pub fn repo_intelligence(&self) -> &RepoIntelligence {
+        &self.repo_intelligence
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolManifestEntry {
     pub name: String,
@@ -103,6 +130,43 @@ pub struct ToolSpec {
     pub description: &'static str,
     pub input_schema: Value,
     pub required_permission: PermissionMode,
+}
+
+const ALWAYS_LOADED_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "bash",
+    "glob_search",
+    "grep_search",
+    "ToolSearch",
+    "RepoOverview",
+    "RepoSearch",
+];
+
+#[must_use]
+pub fn always_loaded_tool_specs() -> Vec<ToolSpec> {
+    mvp_tool_specs()
+        .into_iter()
+        .filter(|spec| ALWAYS_LOADED_TOOL_NAMES.contains(&spec.name))
+        .collect()
+}
+
+#[must_use]
+pub fn serialized_tool_specs_size(specs: &[ToolSpec]) -> usize {
+    serde_json::to_string(
+        &specs
+            .iter()
+            .map(|spec| {
+                json!({
+                    "name": spec.name,
+                    "description": spec.description,
+                    "input_schema": spec.input_schema,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_or(0, |value| value.len())
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +341,43 @@ impl GlobalToolRegistry {
         builtin.chain(runtime).chain(plugin).collect()
     }
 
+    #[must_use]
+    pub fn prompt_definitions(
+        &self,
+        allowed_tools: Option<&BTreeSet<String>>,
+    ) -> Vec<ToolDefinition> {
+        let builtin = always_loaded_tool_specs()
+            .into_iter()
+            .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
+            .map(|spec| ToolDefinition {
+                name: spec.name.to_string(),
+                description: Some(spec.description.to_string()),
+                input_schema: spec.input_schema,
+            });
+        let runtime = self
+            .runtime_tools
+            .iter()
+            .filter(|tool| allowed_tools.is_none_or(|allowed| allowed.contains(tool.name.as_str())))
+            .map(|tool| ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            });
+        let plugin = self
+            .plugin_tools
+            .iter()
+            .filter(|tool| {
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+            })
+            .map(|tool| ToolDefinition {
+                name: tool.definition().name.clone(),
+                description: tool.definition().description.clone(),
+                input_schema: tool.definition().input_schema.clone(),
+            });
+        builtin.chain(runtime).chain(plugin).collect()
+    }
+
     pub fn permission_specs(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
@@ -348,6 +449,28 @@ impl GlobalToolRegistry {
             .map_err(|error| error.to_string())
     }
 
+    pub fn execute_with_context(
+        &self,
+        name: &str,
+        input: &Value,
+        context: &ToolExecutionContext,
+    ) -> Result<String, String> {
+        if mvp_tool_specs().iter().any(|spec| spec.name == name) {
+            return execute_tool_with_enforcer_and_context(
+                self.enforcer.as_ref(),
+                name,
+                input,
+                Some(context),
+            );
+        }
+        self.plugin_tools
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .ok_or_else(|| format!("unsupported tool: {name}"))?
+            .execute(input)
+            .map_err(|error| error.to_string())
+    }
+
     fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
         let builtin = deferred_tool_specs()
             .into_iter()
@@ -386,7 +509,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace. On Windows this usually runs through bash/WSL when available; prefer PowerShell for Windows-native GUI apps or process launches.",
+            description: "Execute a shell command in the current workspace. On Windows this runs through Git Bash when installed, otherwise Windows PowerShell (set CLAW_SHELL=bash|powershell to pin); WSL is never used. Linux-only commands and bash-only syntax are rejected up front with a Windows translation hint.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -598,6 +721,183 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RepoOverview",
+            description: "Return a bounded, high-level repository snapshot (languages, top dirs, manifests, entry points, tests).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "depth": { "type": "integer", "minimum": 1, "maximum": 10 },
+                    "refresh": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskLedgerRead",
+            description: "Read persisted task ledger state (objective, constraints, paths, verification, next steps).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskLedgerUpdate",
+            description: "Update persisted task ledger fields with bounded append semantics.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "objective": { "type": "string" },
+                    "constraints": { "type": "array", "items": { "type": "string" } },
+                    "decisions": { "type": "array", "items": { "type": "string" } },
+                    "relevant_paths": { "type": "array", "items": { "type": "string" } },
+                    "changed_paths": { "type": "array", "items": { "type": "string" } },
+                    "verification": { "type": "array", "items": { "type": "string" } },
+                    "next_steps": { "type": "array", "items": { "type": "string" } },
+                    "repo_snapshot_id": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "RepoSearch",
+            description: "Search repository paths, identifiers, and indexed source text with bounded pageable results.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "path_prefix": { "type": "string" },
+                    "language": { "type": "string" },
+                    "test_only": { "type": "boolean" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "cursor": { "type": "string" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RepoImpact",
+            description: "Given changed paths, return nearby impacted files and likely tests with evidence and confidence.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "changed_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
+                },
+                "required": ["changed_paths"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RepoTests",
+            description: "Propose targeted tests for changed paths, including confidence and fallback integration command.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "changed_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
+                },
+                "required": ["changed_paths"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "RepoIndexStatus",
+            description: "Show repository-index freshness, snapshot metadata, and optional refresh timing.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "refresh": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "WorktreeCreate",
+            description: "Create a git worktree for isolated scoped changes.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "base": { "type": "string" },
+                    "detach": { "type": "boolean" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "WorktreeList",
+            description: "List git worktrees for the current repository.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "WorktreeRemove",
+            description: "Remove a git worktree by path.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "force": { "type": "boolean" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "WorktreeDiff",
+            description: "Show diff for a worktree against a base ref (default main...HEAD).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "base": { "type": "string" },
+                    "head": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "WorktreeIntegrate",
+            description: "Dry-run integration plan for a worktree into current branch; requires explicit approve=true to execute.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "strategy": { "type": "string", "enum": ["merge", "cherry-pick"] },
+                    "approve": { "type": "boolean" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "NotebookEdit",
@@ -1190,11 +1490,45 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_enforcer(None, name, input)
 }
 
+pub fn execute_tool_with_context(
+    name: &str,
+    input: &Value,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    execute_tool_with_enforcer_and_context(None, name, input, Some(context))
+}
+
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
     input: &Value,
 ) -> Result<String, String> {
+    execute_tool_with_enforcer_and_context(enforcer, name, input, None)
+}
+
+// Centralizing dispatch keeps permission checks and tool routing in one auditable table.
+#[allow(clippy::too_many_lines)]
+fn execute_tool_with_enforcer_and_context(
+    enforcer: Option<&PermissionEnforcer>,
+    name: &str,
+    input: &Value,
+    context: Option<&ToolExecutionContext>,
+) -> Result<String, String> {
+    if matches!(
+        name,
+        "RepoOverview"
+            | "RepoSearch"
+            | "RepoImpact"
+            | "RepoTests"
+            | "RepoIndexStatus"
+            | "WorktreeCreate"
+            | "WorktreeList"
+            | "WorktreeRemove"
+            | "WorktreeDiff"
+            | "WorktreeIntegrate"
+    ) {
+        return execute_workspace_tool(name, input, require_tool_context(context)?);
+    }
     match name {
         "bash" => {
             // Parse input to get the command for permission classification
@@ -1235,6 +1569,9 @@ fn execute_tool_with_enforcer(
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
+        "TaskLedgerRead" | "TaskLedgerUpdate" => {
+            Err("session context required for task-ledger tools".to_string())
+        }
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
@@ -1293,6 +1630,38 @@ fn execute_tool_with_enforcer(
             from_value::<TestingPermissionInput>(input).and_then(run_testing_permission)
         }
         _ => Err(format!("unsupported tool: {name}")),
+    }
+}
+
+fn execute_workspace_tool(
+    name: &str,
+    input: &Value,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    match name {
+        "RepoOverview" => from_value::<RepoOverviewInput>(input)
+            .and_then(|value| run_repo_overview(&value, context)),
+        "RepoSearch" => from_value::<RepoSearchToolInput>(input)
+            .and_then(|value| run_repo_search(value, context)),
+        "RepoImpact" => {
+            from_value::<RepoPathsInput>(input).and_then(|value| run_repo_impact(value, context))
+        }
+        "RepoTests" => {
+            from_value::<RepoPathsInput>(input).and_then(|value| run_repo_tests(value, context))
+        }
+        "RepoIndexStatus" => from_value::<RepoIndexStatusInput>(input)
+            .and_then(|value| run_repo_index_status(&value, context)),
+        "WorktreeCreate" => from_value::<WorktreeCreateInput>(input)
+            .and_then(|value| run_worktree_create(value, context)),
+        "WorktreeList" => from_value::<WorktreeListInput>(input)
+            .and_then(|value| run_worktree_list(value, context)),
+        "WorktreeRemove" => from_value::<WorktreeRemoveInput>(input)
+            .and_then(|value| run_worktree_remove(&value, context)),
+        "WorktreeDiff" => from_value::<WorktreeDiffInput>(input)
+            .and_then(|value| run_worktree_diff(value, context)),
+        "WorktreeIntegrate" => from_value::<WorktreeIntegrateInput>(input)
+            .and_then(|value| run_worktree_integrate(value, context)),
+        _ => Err(format!("unsupported workspace tool: {name}")),
     }
 }
 
@@ -2123,6 +2492,246 @@ fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
     to_pretty_json(execute_tool_search(input))
 }
 
+fn require_tool_context(
+    context: Option<&ToolExecutionContext>,
+) -> Result<&ToolExecutionContext, String> {
+    context.ok_or_else(|| "workspace-bound tool execution context required".to_string())
+}
+
+fn run_repo_overview(
+    input: &RepoOverviewInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let output = context.repo_intelligence().overview(
+        input.path.as_deref(),
+        input.depth,
+        input.refresh.unwrap_or(false),
+    )?;
+    to_pretty_json(output).map(repo_intel::truncate_for_model)
+}
+
+fn run_repo_search(
+    input: RepoSearchToolInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let output = context.repo_intelligence().search(RepoSearchInput {
+        query: input.query,
+        path_prefix: input.path_prefix,
+        language: input.language,
+        test_only: input.test_only,
+        limit: input.limit,
+        cursor: input.cursor,
+    })?;
+    to_pretty_json(output).map(repo_intel::truncate_for_model)
+}
+
+fn run_repo_impact(
+    input: RepoPathsInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let output = context.repo_intelligence().impact(input.changed_paths)?;
+    to_pretty_json(output).map(repo_intel::truncate_for_model)
+}
+
+fn run_repo_tests(input: RepoPathsInput, context: &ToolExecutionContext) -> Result<String, String> {
+    let output = context.repo_intelligence().tests(input.changed_paths)?;
+    to_pretty_json(output).map(repo_intel::truncate_for_model)
+}
+
+fn run_repo_index_status(
+    input: &RepoIndexStatusInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let output = context
+        .repo_intelligence()
+        .status(input.refresh.unwrap_or(false))?;
+    to_pretty_json(output).map(repo_intel::truncate_for_model)
+}
+
+fn run_worktree_create(
+    input: WorktreeCreateInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let mut args = vec!["worktree".to_string(), "add".to_string()];
+    if input.detach.unwrap_or(false) {
+        args.push("--detach".to_string());
+    }
+    if let Some(branch) = input.branch {
+        args.push("-b".to_string());
+        args.push(branch);
+    }
+    args.push(input.path.clone());
+    if let Some(base) = input.base {
+        args.push(base);
+    }
+    let output = run_git_capture_in_dir(context.workspace_root(), &args)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    to_pretty_json(json!({
+        "path": input.path,
+        "command": format!("git {}", args.join(" ")),
+        "stdout": stdout,
+        "stderr": stderr,
+        "success": output.status.success(),
+    }))
+}
+
+fn run_worktree_list(
+    _input: WorktreeListInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let output = run_git_capture_in_dir(
+        context.workspace_root(),
+        &[
+            "worktree".to_string(),
+            "list".to_string(),
+            "--porcelain".to_string(),
+        ],
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let worktrees = parse_worktree_list(&stdout);
+    to_pretty_json(json!({
+        "worktrees": worktrees,
+        "stderr": stderr,
+        "success": output.status.success(),
+    }))
+}
+
+fn run_worktree_remove(
+    input: &WorktreeRemoveInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let registered = registered_worktree_path(context.workspace_root(), &input.path)?;
+    if same_filesystem_path(&registered, context.workspace_root()) {
+        return Err("refusing to remove the primary workspace".to_string());
+    }
+    let mut args = vec!["worktree".to_string(), "remove".to_string()];
+    if input.force.unwrap_or(false) {
+        args.push("--force".to_string());
+    }
+    args.push(registered.display().to_string());
+    let output = run_git_capture_in_dir(context.workspace_root(), &args)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    to_pretty_json(json!({
+        "path": input.path,
+        "stdout": stdout,
+        "stderr": stderr,
+        "success": output.status.success(),
+    }))
+}
+
+fn run_worktree_diff(
+    input: WorktreeDiffInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let registered = registered_worktree_path(context.workspace_root(), &input.path)?;
+    let base = input.base.unwrap_or_else(|| "main".to_string());
+    let head = input.head.unwrap_or_else(|| "HEAD".to_string());
+    let range = format!("{base}...{head}");
+    let output = run_git_capture_in_dir(&registered, &["diff".to_string(), range.clone()])?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    to_pretty_json(json!({
+        "path": input.path,
+        "range": range,
+        "stdout": stdout,
+        "stderr": stderr,
+        "success": output.status.success(),
+    }))
+}
+
+fn run_worktree_integrate(
+    input: WorktreeIntegrateInput,
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    let strategy = input.strategy.unwrap_or_else(|| "merge".to_string());
+    if !input.approve.unwrap_or(false) {
+        return to_pretty_json(json!({
+            "path": input.path,
+            "strategy": strategy,
+            "approved": false,
+            "mode": "dry-run",
+            "message": "Integration requires approve=true. The target and source must both be clean registered worktrees.",
+        }));
+    }
+
+    let source = registered_worktree_path(context.workspace_root(), &input.path)?;
+    if same_filesystem_path(&source, context.workspace_root()) {
+        return Err("source worktree must differ from the primary workspace".to_string());
+    }
+    require_clean_worktree(context.workspace_root(), "integration target")?;
+    require_clean_worktree(&source, "integration source")?;
+
+    let before = git_stdout_in_dir(context.workspace_root(), &["rev-parse", "HEAD"])?;
+    let source_head = git_stdout_in_dir(&source, &["rev-parse", "HEAD"])?;
+    if before == source_head {
+        return to_pretty_json(json!({
+            "path": source,
+            "strategy": strategy,
+            "approved": true,
+            "mode": "executed",
+            "changed_paths": [],
+            "message": "Target already contains the source HEAD.",
+        }));
+    }
+
+    let args = integration_args(context.workspace_root(), &strategy, &source_head)?;
+    if args.is_empty() {
+        return Err("no source commits are available to integrate".to_string());
+    }
+    let output = run_git_capture_in_dir(context.workspace_root(), &args)?;
+    if !output.status.success() {
+        let abort_args = if strategy == "merge" {
+            vec!["merge".to_string(), "--abort".to_string()]
+        } else {
+            vec!["cherry-pick".to_string(), "--abort".to_string()]
+        };
+        let _ = run_git_capture_in_dir(context.workspace_root(), &abort_args);
+        return Err(format!(
+            "integration failed and rollback was attempted: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    require_clean_worktree(context.workspace_root(), "integrated target")?;
+    let after = git_stdout_in_dir(context.workspace_root(), &["rev-parse", "HEAD"])?;
+    let changed = git_stdout_in_dir(
+        context.workspace_root(),
+        &["diff", "--name-only", &format!("{before}..{after}")],
+    )?;
+    let changed_paths = changed.lines().map(str::to_string).collect::<Vec<_>>();
+    to_pretty_json(json!({
+        "path": source,
+        "strategy": strategy,
+        "approved": true,
+        "mode": "executed",
+        "before": before,
+        "after": after,
+        "changed_paths": changed_paths,
+        "stdout": String::from_utf8_lossy(&output.stdout),
+    }))
+}
+
+fn integration_args(root: &Path, strategy: &str, source_head: &str) -> Result<Vec<String>, String> {
+    match strategy {
+        "merge" => Ok(vec![
+            "merge".to_string(),
+            "--no-ff".to_string(),
+            "--no-edit".to_string(),
+            source_head.to_string(),
+        ]),
+        "cherry-pick" => {
+            let range = format!("HEAD..{source_head}");
+            let commits = git_stdout_in_dir(root, &["rev-list", "--reverse", &range])?;
+            let mut args = vec!["cherry-pick".to_string()];
+            args.extend(commits.lines().map(str::to_string));
+            Ok(args)
+        }
+        other => Err(format!("unsupported integration strategy `{other}`")),
+    }
+}
+
 fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
     to_pretty_json(execute_notebook_edit(input)?)
 }
@@ -2235,6 +2844,115 @@ fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
 }
 
+fn run_git_capture_in_dir(dir: &Path, args: &[String]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to run git {} in {}: {error}",
+                args.join(" "),
+                dir.display()
+            )
+        })
+}
+
+fn git_stdout_in_dir(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let owned = args
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    let output = run_git_capture_in_dir(dir, &owned)?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn require_clean_worktree(path: &Path, label: &str) -> Result<(), String> {
+    let status = git_stdout_in_dir(path, &["status", "--porcelain"])?;
+    if status.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} is dirty; commit or stash changes before integration"
+        ))
+    }
+}
+
+fn registered_worktree_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
+    let requested_path = PathBuf::from(requested);
+    let requested = requested_path.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve worktree `{}`: {error}",
+            requested_path.display()
+        )
+    })?;
+    let listing = git_stdout_in_dir(root, &["worktree", "list", "--porcelain"])?;
+    let registered = listing.lines().filter_map(|line| {
+        line.strip_prefix("worktree ")
+            .and_then(|path| PathBuf::from(path).canonicalize().ok())
+    });
+    if registered
+        .into_iter()
+        .any(|path| same_filesystem_path(&path, &requested))
+    {
+        Ok(requested)
+    } else {
+        Err(format!(
+            "`{}` is not a registered worktree for `{}`",
+            requested.display(),
+            root.display()
+        ))
+    }
+}
+
+fn same_filesystem_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn parse_worktree_list(stdout: &str) -> Vec<Value> {
+    let mut worktrees = Vec::new();
+    let mut current = Map::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !current.is_empty() {
+                worktrees.push(Value::Object(current.clone()));
+                current.clear();
+            }
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("worktree ") {
+            current.insert("path".to_string(), Value::String(value.to_string()));
+        } else if let Some(value) = trimmed.strip_prefix("HEAD ") {
+            current.insert("head".to_string(), Value::String(value.to_string()));
+        } else if let Some(value) = trimmed.strip_prefix("branch ") {
+            current.insert("branch".to_string(), Value::String(value.to_string()));
+        } else {
+            current.insert(trimmed.to_string(), Value::Bool(true));
+        }
+    }
+    if !current.is_empty() {
+        worktrees.push(Value::Object(current));
+    }
+    worktrees
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn io_to_string(error: std::io::Error) -> String {
     error.to_string()
@@ -2328,6 +3046,64 @@ struct AgentInput {
 struct ToolSearchInput {
     query: String,
     max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoOverviewInput {
+    path: Option<String>,
+    depth: Option<usize>,
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoSearchToolInput {
+    query: String,
+    path_prefix: Option<String>,
+    language: Option<String>,
+    test_only: Option<bool>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoPathsInput {
+    changed_paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoIndexStatusInput {
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeCreateInput {
+    path: String,
+    branch: Option<String>,
+    base: Option<String>,
+    detach: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeListInput {}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeRemoveInput {
+    path: String,
+    force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeDiffInput {
+    path: String,
+    base: Option<String>,
+    head: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeIntegrateInput {
+    path: String,
+    strategy: Option<String>,
+    approve: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2638,6 +3414,7 @@ struct AgentJob {
     prompt: String,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
+    workspace_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -3620,6 +4397,9 @@ where
         prompt: input.prompt,
         system_prompt,
         allowed_tools,
+        workspace_root: std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map_err(|error| format!("failed to resolve sub-agent workspace: {error}"))?,
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
@@ -3678,9 +4458,10 @@ fn build_agent_runtime(
     let api_client = ProviderRuntimeClient::new(model, allowed_tools.clone())?;
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
+        .with_workspace_root(job.workspace_root.clone())?
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
     Ok(ConversationRuntime::new(
-        Session::new(),
+        Session::new().with_workspace_root(job.workspace_root.clone()),
         api_client,
         tool_executor,
         permission_policy,
@@ -4773,6 +5554,7 @@ async fn stream_with_provider(
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
     enforcer: Option<PermissionEnforcer>,
+    tool_execution_context: Option<ToolExecutionContext>,
 }
 
 impl SubagentToolExecutor {
@@ -4780,7 +5562,13 @@ impl SubagentToolExecutor {
         Self {
             allowed_tools,
             enforcer: None,
+            tool_execution_context: None,
         }
+    }
+
+    fn with_workspace_root(mut self, workspace_root: PathBuf) -> Result<Self, String> {
+        self.tool_execution_context = Some(ToolExecutionContext::new(workspace_root)?);
+        Ok(self)
     }
 
     fn with_enforcer(mut self, enforcer: PermissionEnforcer) -> Self {
@@ -4798,8 +5586,13 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value)
-            .map_err(ToolError::new)
+        execute_tool_with_enforcer_and_context(
+            self.enforcer.as_ref(),
+            tool_name,
+            &value,
+            self.tool_execution_context.as_ref(),
+        )
+        .map_err(ToolError::new)
     }
 }
 
@@ -4943,12 +5736,7 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 fn deferred_tool_specs() -> Vec<ToolSpec> {
     mvp_tool_specs()
         .into_iter()
-        .filter(|spec| {
-            !matches!(
-                spec.name,
-                "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search"
-            )
-        })
+        .filter(|spec| !ALWAYS_LOADED_TOOL_NAMES.contains(&spec.name))
         .collect()
 }
 
@@ -6314,12 +7102,13 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, classify_lane_failure,
-        derive_agent_state, execute_agent_with_spawn, execute_tool, extract_recovery_outcome,
-        final_assistant_text, global_cron_registry, maybe_commit_provenance, mvp_tool_specs,
-        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
-        run_task_packet, AgentInput, AgentJob, GlobalToolRegistry, LaneEventName, LaneFailureClass,
-        ProviderRuntimeClient, SubagentToolExecutor,
+        agent_permission_policy, allowed_tools_for_subagent, always_loaded_tool_specs,
+        classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
+        execute_tool_with_context, extract_recovery_outcome, final_assistant_text,
+        global_cron_registry, maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
+        persist_agent_terminal_state, push_output_block, run_task_packet,
+        serialized_tool_specs_size, AgentInput, AgentJob, GlobalToolRegistry, LaneEventName,
+        LaneFailureClass, ProviderRuntimeClient, SubagentToolExecutor, ToolExecutionContext,
     };
     use api::OutputContentBlock;
     use runtime::ProviderFallbackConfig;
@@ -6352,12 +7141,44 @@ mod tests {
         let _guard = env_guard();
     }
 
+    #[test]
+    fn always_loaded_tools_keep_core_and_defer_specialized_repo_tools() {
+        let names = always_loaded_tool_specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"glob_search"));
+        assert!(names.contains(&"grep_search"));
+        assert!(names.contains(&"ToolSearch"));
+        assert!(!names.contains(&"RepoImpact"));
+        assert!(!names.contains(&"RepoTests"));
+        assert!(!names.contains(&"RepoIndexStatus"));
+        assert!(!names.contains(&"WorktreeCreate"));
+        assert!(!names.contains(&"TaskLedgerRead"));
+        assert!(!names.contains(&"TaskLedgerUpdate"));
+    }
+
+    #[test]
+    fn always_loaded_schema_size_is_smaller_than_full_builtin_schema() {
+        let full = mvp_tool_specs();
+        let always_loaded = always_loaded_tool_specs();
+        assert!(serialized_tool_specs_size(&always_loaded) < serialized_tool_specs_size(&full));
+    }
+
     fn temp_path(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("clawd-tools-{unique}-{name}"))
+    }
+
+    fn normalized_json_path(value: &serde_json::Value) -> String {
+        value.as_str().expect("path").replace('\\', "/")
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -6424,6 +7245,152 @@ mod tests {
         assert!(names.contains(&"WorkerObserve"));
         assert!(names.contains(&"WorkerAwaitReady"));
         assert!(names.contains(&"WorkerSendPrompt"));
+        assert!(names.contains(&"RepoOverview"));
+        assert!(names.contains(&"RepoSearch"));
+        assert!(names.contains(&"RepoImpact"));
+        assert!(names.contains(&"RepoTests"));
+        assert!(names.contains(&"RepoIndexStatus"));
+        assert!(names.contains(&"TaskLedgerRead"));
+        assert!(names.contains(&"TaskLedgerUpdate"));
+        assert!(names.contains(&"WorktreeCreate"));
+        assert!(names.contains(&"WorktreeList"));
+        assert!(names.contains(&"WorktreeRemove"));
+        assert!(names.contains(&"WorktreeDiff"));
+        assert!(names.contains(&"WorktreeIntegrate"));
+    }
+
+    #[test]
+    fn repo_tools_execute_with_bounded_outputs() {
+        let context = ToolExecutionContext::new(
+            std::env::current_dir().expect("current directory should resolve"),
+        )
+        .expect("tool context should initialize");
+        let status =
+            execute_tool_with_context("RepoIndexStatus", &json!({"refresh": true}), &context)
+                .expect("RepoIndexStatus should succeed");
+        let status_json: serde_json::Value = serde_json::from_str(&status).expect("json");
+        assert!(status_json["snapshot_id"].is_string());
+        assert!(status_json["index_path"].is_string());
+
+        let overview = execute_tool_with_context("RepoOverview", &json!({"depth": 2}), &context)
+            .expect("RepoOverview should work");
+        let overview_json: serde_json::Value = serde_json::from_str(&overview).expect("json");
+        assert!(overview_json["indexed_files"].is_number());
+        assert!(overview_json["top_directories"].is_array());
+
+        let search = execute_tool_with_context(
+            "RepoSearch",
+            &json!({"query": "session", "limit": 5}),
+            &context,
+        )
+        .expect("RepoSearch should work");
+        let search_json: serde_json::Value = serde_json::from_str(&search).expect("json");
+        assert_eq!(search_json["limit"], 5);
+        assert!(search_json["hits"].is_array());
+    }
+
+    #[test]
+    fn repository_tool_contexts_remain_isolated_across_threads() {
+        let root_a = temp_path("repo-context-a");
+        let root_b = temp_path("repo-context-b");
+        std::fs::create_dir_all(&root_a).expect("create repo A");
+        std::fs::create_dir_all(&root_b).expect("create repo B");
+        std::fs::write(root_a.join("alpha.txt"), "unique_alpha_symbol\n").expect("write repo A");
+        std::fs::write(root_b.join("beta.txt"), "unique_beta_symbol\n").expect("write repo B");
+
+        let context_a = ToolExecutionContext::new(&root_a).expect("context A");
+        let context_b = ToolExecutionContext::new(&root_b).expect("context B");
+        context_a.repo_intelligence().refresh().expect("refresh A");
+        context_b.repo_intelligence().refresh().expect("refresh B");
+
+        let thread_a = std::thread::spawn(move || {
+            for _ in 0..100 {
+                let output = execute_tool_with_context(
+                    "RepoSearch",
+                    &json!({"query": "unique_alpha_symbol"}),
+                    &context_a,
+                )
+                .expect("search A");
+                assert!(output.contains("alpha.txt"));
+                assert!(!output.contains("beta.txt"));
+            }
+        });
+        let thread_b = std::thread::spawn(move || {
+            for _ in 0..100 {
+                let output = execute_tool_with_context(
+                    "RepoSearch",
+                    &json!({"query": "unique_beta_symbol"}),
+                    &context_b,
+                )
+                .expect("search B");
+                assert!(output.contains("beta.txt"));
+                assert!(!output.contains("alpha.txt"));
+            }
+        });
+        thread_a.join().expect("thread A");
+        thread_b.join().expect("thread B");
+
+        std::fs::remove_dir_all(root_a).ok();
+        std::fs::remove_dir_all(root_b).ok();
+    }
+
+    #[test]
+    fn task_ledger_tools_require_session_context() {
+        let read = execute_tool("TaskLedgerRead", &json!({}))
+            .expect_err("direct task-ledger execution should be rejected");
+        assert!(read.contains("session context required"));
+        let update = execute_tool("TaskLedgerUpdate", &json!({"objective": "x"}))
+            .expect_err("direct task-ledger execution should be rejected");
+        assert!(update.contains("session context required"));
+    }
+
+    #[test]
+    fn worktree_integrate_stays_dry_run_without_approval() {
+        let context = ToolExecutionContext::new(
+            std::env::current_dir().expect("current directory should resolve"),
+        )
+        .expect("tool context should initialize");
+        let output = execute_tool_with_context(
+            "WorktreeIntegrate",
+            &json!({"path":"feature/worktree-a","strategy":"merge","approve":false}),
+            &context,
+        )
+        .expect("WorktreeIntegrate dry-run should succeed");
+        let json: serde_json::Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(json["mode"], "dry-run");
+        assert!(json["message"]
+            .as_str()
+            .is_some_and(|v| v.contains("requires") || v.contains("reports")));
+    }
+
+    #[test]
+    fn worktree_integrate_merges_clean_registered_worktree_after_approval() {
+        let root = temp_path("integrate-root");
+        let feature = temp_path("integrate-feature");
+        init_git_repo(&root);
+        let feature_text = feature.to_string_lossy().to_string();
+        run_git(
+            &root,
+            &["worktree", "add", "-b", "feature-test", &feature_text],
+        );
+        commit_file(&feature, "feature.txt", "integrated\n", "feature commit");
+
+        let context = ToolExecutionContext::new(&root).expect("tool context");
+        let output = execute_tool_with_context(
+            "WorktreeIntegrate",
+            &json!({"path": feature, "strategy": "merge", "approve": true}),
+            &context,
+        )
+        .expect("approved clean integration should succeed");
+        let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(output["mode"], "executed");
+        assert!(root.join("feature.txt").is_file());
+        assert!(output["changed_paths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == "feature.txt")));
+
+        run_git(&root, &["worktree", "remove", &feature_text]);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -6525,7 +7492,7 @@ mod tests {
         fs::create_dir_all(&claw_dir).expect("create .claw dir");
         // Use the actual OS temp dir so the worktree path matches the allowlist
         let tmp_root = std::env::temp_dir().to_str().expect("utf-8").to_string();
-        let settings = format!("{{\"trustedRoots\": [\"{tmp_root}\"]}}");
+        let settings = serde_json::json!({ "trustedRoots": [tmp_root] }).to_string();
         fs::write(claw_dir.join("settings.json"), settings).expect("write settings");
 
         // WorkerCreate with no per-call trusted_roots — config should supply them
@@ -7504,10 +8471,7 @@ mod tests {
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["skill"], "help");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("/help/SKILL.md"));
+        assert!(normalized_json_path(&output["path"]).ends_with("/help/SKILL.md"));
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
@@ -7523,10 +8487,7 @@ mod tests {
         let dollar_output: serde_json::Value =
             serde_json::from_str(&dollar_result).expect("valid json");
         assert_eq!(dollar_output["skill"], "$help");
-        assert!(dollar_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("/help/SKILL.md"));
+        assert!(normalized_json_path(&dollar_output["path"]).ends_with("/help/SKILL.md"));
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -7595,19 +8556,15 @@ mod tests {
             .expect("project-local skill should resolve");
         let skill_output: serde_json::Value =
             serde_json::from_str(&skill_result).expect("valid json");
-        assert!(skill_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claw/skills/plan/SKILL.md"));
+        assert!(normalized_json_path(&skill_output["path"]).ends_with(".claw/skills/plan/SKILL.md"));
 
         let command_result = execute_tool("Skill", &json!({ "skill": "/handoff" }))
             .expect("legacy command should resolve");
         let command_output: serde_json::Value =
             serde_json::from_str(&command_result).expect("valid json");
-        assert!(command_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claw/commands/handoff.md"));
+        assert!(
+            normalized_json_path(&command_output["path"]).ends_with(".claw/commands/handoff.md")
+        );
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
@@ -7642,10 +8599,7 @@ mod tests {
             .expect("project-local skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claude/skills/trace/SKILL.md"));
+        assert!(normalized_json_path(&output["path"]).ends_with(".claude/skills/trace/SKILL.md"));
         assert_eq!(output["description"], "Project-local trace helper");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -7704,15 +8658,11 @@ mod tests {
         let omc_output: serde_json::Value = serde_json::from_str(&omc_result).expect("valid json");
         let agents_output: serde_json::Value =
             serde_json::from_str(&agents_result).expect("valid json");
-        assert!(omc_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".omc/skills/hud/SKILL.md"));
+        assert!(normalized_json_path(&omc_output["path"]).ends_with(".omc/skills/hud/SKILL.md"));
         assert_eq!(omc_output["description"], "Project-local OMC HUD helper");
-        assert!(agents_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".agents/skills/trace/SKILL.md"));
+        assert!(
+            normalized_json_path(&agents_output["path"]).ends_with(".agents/skills/trace/SKILL.md")
+        );
         assert_eq!(
             agents_output["description"],
             "Project-local agents compatibility helper"
@@ -7764,10 +8714,9 @@ mod tests {
             .expect("learned skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("skills/omc-learned/learned/SKILL.md"));
+        assert!(
+            normalized_json_path(&output["path"]).ends_with("skills/omc-learned/learned/SKILL.md")
+        );
         assert_eq!(output["description"], "Learned OMC skill");
 
         match original_home {
@@ -7823,9 +8772,7 @@ mod tests {
             execute_tool("Skill", &json!({ "skill": "statusline" })).expect("direct skill");
         let direct_skill_output: serde_json::Value =
             serde_json::from_str(&direct_skill).expect("valid skill json");
-        assert!(direct_skill_output["path"]
-            .as_str()
-            .expect("path")
+        assert!(normalized_json_path(&direct_skill_output["path"])
             .ends_with("skills/statusline/SKILL.md"));
         assert_eq!(direct_skill_output["description"], "Claude config skill");
 
@@ -7833,9 +8780,7 @@ mod tests {
             execute_tool("Skill", &json!({ "skill": "doctor-check" })).expect("direct command");
         let legacy_command_output: serde_json::Value =
             serde_json::from_str(&legacy_command).expect("valid command json");
-        assert!(legacy_command_output["path"]
-            .as_str()
-            .expect("path")
+        assert!(normalized_json_path(&legacy_command_output["path"])
             .ends_with("commands/doctor-check.md"));
         assert_eq!(
             legacy_command_output["description"],
@@ -7890,10 +8835,7 @@ mod tests {
             .expect("legacy command markdown should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claude/commands/team.md"));
+        assert!(normalized_json_path(&output["path"]).ends_with(".claude/commands/team.md"));
         assert_eq!(output["description"], "Legacy team workflow");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -9107,10 +10049,7 @@ mod tests {
             .expect("glob should succeed");
         let globbed_output: serde_json::Value = serde_json::from_str(&globbed).expect("json");
         assert_eq!(globbed_output["numFiles"], 1);
-        assert!(globbed_output["filenames"][0]
-            .as_str()
-            .expect("filename")
-            .ends_with("nested/lib.rs"));
+        assert!(normalized_json_path(&globbed_output["filenames"][0]).ends_with("nested/lib.rs"));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
             .expect_err("invalid glob should fail");
@@ -9478,6 +10417,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
             .lock()

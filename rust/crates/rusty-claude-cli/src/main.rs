@@ -61,7 +61,8 @@ use runtime::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tools::{
-    execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
+    execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolExecutionContext,
+    ToolSearchOutput,
 };
 
 /// When true (CLI `--auto-approve-permissions` or env `CLAW_AUTO_APPROVE_PERMISSIONS=1`),
@@ -88,6 +89,7 @@ const OFFICIAL_REPO_SLUG: &str = "ultraworkers/claw-code";
 const DEPRECATED_INSTALL_COMMAND: &str = "cargo install claw-code";
 const LATEST_SESSION_REFERENCE: &str = "latest";
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
+const MAX_PIPED_STDIN_BYTES: usize = 1024 * 1024;
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
     "-h",
@@ -149,20 +151,40 @@ Run `claw --help` for usage."
 /// Read piped stdin content when stdin is not a terminal.
 ///
 /// Returns `None` when stdin is attached to a terminal (interactive REPL use),
-/// when reading fails, or when the piped content is empty after trimming.
+/// when the piped content is empty after trimming.
 /// Returns `Some(raw_content)` when a pipe delivered non-empty content.
-fn read_piped_stdin() -> Option<String> {
+fn read_piped_stdin() -> io::Result<Option<String>> {
+    if cfg!(test) {
+        return Ok(None);
+    }
     if io::stdin().is_terminal() {
-        return None;
+        return Ok(None);
     }
-    let mut buffer = String::new();
-    if io::stdin().read_to_string(&mut buffer).is_err() {
-        return None;
+    let mut bytes = Vec::new();
+    let limit = u64::try_from(MAX_PIPED_STDIN_BYTES + 1).unwrap_or(u64::MAX);
+    io::stdin().lock().take(limit).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PIPED_STDIN_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("piped stdin exceeds the {MAX_PIPED_STDIN_BYTES} byte limit"),
+        ));
     }
+    if bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "piped stdin looks binary (contains NUL bytes)",
+        ));
+    }
+    let buffer = String::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("piped stdin must be valid UTF-8 text: {error}"),
+        )
+    })?;
     if buffer.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(buffer)
+    Ok(Some(buffer))
 }
 
 /// Merge a piped stdin payload into a prompt argument.
@@ -185,6 +207,7 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
     format!("{prompt}\n\n{trimmed}")
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
@@ -245,10 +268,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // prompter may invoke CliPermissionPrompter::decide(), stdin
             // must remain available for interactive approval; otherwise the
             // prompter's read_line() would hit EOF and deny every request.
-            let stdin_context = if matches!(permission_mode, PermissionMode::DangerFullAccess) {
-                read_piped_stdin()
-            } else {
+            let stdin_context = if io::stdin().is_terminal() {
                 None
+            } else {
+                let piped = read_piped_stdin()?;
+                if matches!(permission_mode, PermissionMode::DangerFullAccess) {
+                    piped
+                } else {
+                    if piped.is_some() {
+                        eprintln!(
+                            "Warning: piped stdin was ignored because permission mode `{}` may need stdin for approval prompts. Use --permission-mode danger-full-access to include piped context.",
+                            permission_mode.as_str()
+                        );
+                    }
+                    None
+                }
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let mut cli = LiveCli::new(
@@ -281,8 +315,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mut model_context_window,
             model_explicit,
         } => {
-            if openrouter_picker::should_run_openrouter_repl_model_picker(model_explicit) {
-                match openrouter_picker::run_openrouter_model_picker() {
+            if let Some(reason) =
+                openrouter_picker::openrouter_repl_model_picker_skip_reason(model_explicit)
+            {
+                let base = api::read_openai_compat_base_url(api::OpenAiCompatConfig::openai());
+                if base.contains("openrouter") {
+                    eprintln!("OpenRouter model picker skipped: {reason}");
+                }
+            } else {
+                let picker_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    openrouter_picker::run_openrouter_model_picker,
+                ))
+                .unwrap_or_else(|_| {
+                    Err("OpenRouter model picker panicked unexpectedly".to_string())
+                });
+                match picker_result {
                     Ok((picked, ctx)) => {
                         model = resolve_model_alias_with_config(&picked);
                         if model_context_window.is_none() {
@@ -678,13 +725,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // rather than starting the interactive REPL (which would consume the pipe and
         // print the startup banner, then exit without sending anything to the API).
         if !std::io::stdin().is_terminal() {
-            let mut buf = String::new();
-            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf);
-            let piped = buf.trim().to_string();
-            if !piped.is_empty() {
+            if let Some(piped) = read_piped_stdin().map_err(|error| error.to_string())? {
                 return Ok(CliAction::Prompt {
                     model,
-                    prompt: piped,
+                    prompt: piped.trim().to_string(),
                     allowed_tools,
                     permission_mode,
                     output_format,
@@ -1157,15 +1201,15 @@ fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
                 "unsupported permission mode '{value}'. Use read-only, workspace-write, or danger-full-access."
             )
         })
-        .map(permission_mode_from_label)
+        .and_then(permission_mode_from_label)
 }
 
-fn permission_mode_from_label(mode: &str) -> PermissionMode {
+fn permission_mode_from_label(mode: &str) -> Result<PermissionMode, String> {
     match mode {
-        "read-only" => PermissionMode::ReadOnly,
-        "workspace-write" => PermissionMode::WorkspaceWrite,
-        "danger-full-access" => PermissionMode::DangerFullAccess,
-        other => panic!("unsupported permission mode label: {other}"),
+        "read-only" => Ok(PermissionMode::ReadOnly),
+        "workspace-write" => Ok(PermissionMode::WorkspaceWrite),
+        "danger-full-access" => Ok(PermissionMode::DangerFullAccess),
+        other => Err(format!("unsupported permission mode label: {other}")),
     }
 }
 
@@ -1182,7 +1226,7 @@ fn default_permission_mode() -> PermissionMode {
         .ok()
         .as_deref()
         .and_then(normalize_permission_mode)
-        .map(permission_mode_from_label)
+        .and_then(|mode| permission_mode_from_label(mode).ok())
         .or_else(config_permission_mode_for_current_dir)
         .unwrap_or(PermissionMode::DangerFullAccess)
 }
@@ -1203,7 +1247,7 @@ fn config_model_for_current_dir() -> Option<String> {
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }
 
-/// OpenRouter stack: non-empty OpenAI-compat API key and base URL pointing at OpenRouter.
+/// `OpenRouter` stack: non-empty OpenAI-compat API key and base URL pointing at `OpenRouter`.
 /// When set, `ANTHROPIC_MODEL` must not override the CLI default (OpenRouter-first policy).
 fn openrouter_stack_configured() -> bool {
     if !has_api_key("OPENAI_API_KEY") {
@@ -1249,7 +1293,7 @@ fn filter_tool_specs(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
 ) -> Vec<ToolDefinition> {
-    tool_registry.definitions(allowed_tools)
+    tool_registry.prompt_definitions(allowed_tools)
 }
 
 fn parse_system_prompt_args(
@@ -3045,6 +3089,7 @@ fn run_resume_command(
             })
         }
         SlashCommand::Bughunter { .. }
+        | SlashCommand::Order
         | SlashCommand::Commit { .. }
         | SlashCommand::Pr { .. }
         | SlashCommand::Issue { .. }
@@ -3194,6 +3239,7 @@ fn model_context_window_from_env() -> Option<u32> {
         .and_then(|raw| raw.trim().parse::<u32>().ok().filter(|&n| n > 0))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn run_repl(
     model: String,
     allowed_tools: Option<AllowedToolSet>,
@@ -3206,6 +3252,10 @@ fn run_repl(
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
     let resolved_model = resolve_repl_model(model);
+    eprintln!(
+        "Initializing ClawCodex (loading tools, plugins, and workspace). This may take 20-45 seconds..."
+    );
+    let _ = io::stderr().flush();
     let mut cli = LiveCli::new(
         resolved_model,
         true,
@@ -3226,6 +3276,14 @@ fn run_repl(
             input::ReadOutcome::Submit(input) => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == "/order" {
+                    if let Some(multiline) = collect_order_multiline_prompt(&mut editor)? {
+                        editor.push_history(multiline.clone());
+                        cli.record_prompt_history(&multiline);
+                        cli.run_turn(&multiline)?;
+                    }
                     continue;
                 }
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
@@ -3270,6 +3328,37 @@ fn run_repl(
     Ok(())
 }
 
+fn collect_order_multiline_prompt(
+    editor: &mut input::LineEditor,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    println!("Order mode started. Enter your full request, then finish with /end on its own line.");
+    let mut lines = Vec::new();
+    loop {
+        match editor.read_line()? {
+            input::ReadOutcome::Submit(line) => {
+                if line.trim() == "/end" {
+                    let Some(joined) = finalize_order_multiline(&lines) else {
+                        eprintln!("Order mode ended with an empty prompt; nothing submitted.");
+                        return Ok(None);
+                    };
+                    return Ok(Some(joined));
+                }
+                lines.push(line);
+            }
+            input::ReadOutcome::Cancel => {}
+            input::ReadOutcome::Exit => {
+                eprintln!("Order mode canceled before /end.");
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn finalize_order_multiline(lines: &[String]) -> Option<String> {
+    let joined = lines.join("\n");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
 #[derive(Debug, Clone)]
 struct SessionHandle {
     id: String,
@@ -3295,7 +3384,7 @@ struct LiveCli {
     runtime: BuiltRuntime,
     session: SessionHandle,
     prompt_history: Vec<PromptHistoryEntry>,
-    /// Model context window (input tokens), when known (OpenRouter metadata or `--model-context-window`).
+    /// Model context window (input tokens), when known (`OpenRouter` metadata or `--model-context-window`).
     model_context_window: Option<u32>,
 }
 
@@ -3841,14 +3930,20 @@ impl LiveCli {
             |_| self.session.path.display().to_string(),
             |path| path.display().to_string(),
         );
+        // Blue CLAWCODEX wordmark (figlet "ANSI Shadow"). Built as a line array
+        // so the leading spaces on the first/last rows survive — the string
+        // continuation escapes below would otherwise strip leading whitespace.
+        let wordmark = [
+            " ██████╗██╗      █████╗ ██╗    ██╗ ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗",
+            "██╔════╝██║     ██╔══██╗██║    ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝",
+            "██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║  ██║█████╗   ╚███╔╝",
+            "██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗",
+            "╚██████╗███████╗██║  ██║╚███╔███╔╝╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗",
+            " ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
+        ]
+        .join("\n");
         format!(
-            "\x1b[38;5;196m\
- ██████╗██╗      █████╗ ██╗    ██╗\n\
-██╔════╝██║     ██╔══██╗██║    ██║\n\
-██║     ██║     ███████║██║ █╗ ██║\n\
-██║     ██║     ██╔══██║██║███╗██║\n\
-╚██████╗███████╗██║  ██║╚███╔███╔╝\n\
- ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝\x1b[0m \x1b[38;5;208mCode\x1b[0m 🦞\n\n\
+            "\x1b[38;5;39m{wordmark}\x1b[0m\n\n\
   \x1b[2mModel\x1b[0m            {}\n\
   \x1b[2mPermissions\x1b[0m      {}\n\
   \x1b[2mBranch\x1b[0m           {}\n\
@@ -3856,7 +3951,7 @@ impl LiveCli {
   \x1b[2mDirectory\x1b[0m        {}\n\
   \x1b[2mSession\x1b[0m          {}\n\
   \x1b[2mAuto-save\x1b[0m        {}\n\n\
-  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for workflow completions · \x1b[2mShift+Enter\x1b[0m for newline",
+  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for workflow completions · \x1b[1m/order\x1b[0m ... \x1b[1m/end\x1b[0m for dependable multiline",
             self.model,
             self.permission_mode.as_str(),
             git_branch,
@@ -4021,6 +4116,12 @@ impl LiveCli {
         Ok(match command {
             SlashCommand::Help => {
                 println!("{}", render_repl_help());
+                false
+            }
+            SlashCommand::Order => {
+                println!(
+                    "Use /order to start multiline capture, then /end on its own line to submit."
+                );
                 false
             }
             SlashCommand::Status => {
@@ -4349,7 +4450,7 @@ impl LiveCli {
 
         let previous = self.permission_mode.as_str().to_string();
         let session = self.runtime.session().clone();
-        self.permission_mode = permission_mode_from_label(normalized);
+        self.permission_mode = permission_mode_from_label(normalized)?;
         let runtime = build_runtime(
             session,
             &self.session.id,
@@ -5033,7 +5134,8 @@ fn render_repl_help() -> String {
         "  Ctrl-R               Reverse-search prompt history".to_string(),
         "  Tab                  Complete commands, modes, and recent sessions".to_string(),
         "  Ctrl-C               Clear input (or exit on empty prompt)".to_string(),
-        "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
+        "  /order ... /end      Submit dependable multiline prompts".to_string(),
+        "  Shift+Enter/Ctrl+J   Insert a newline (optional)".to_string(),
         "  Auto-save            .claw/sessions/<session-id>.jsonl".to_string(),
         "  Resume latest        /resume latest".to_string(),
         "  Browse sessions      /session list".to_string(),
@@ -5937,6 +6039,7 @@ fn format_history_timestamp(timestamp_ms: u64) -> String {
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation
 )]
+#[allow(clippy::similar_names)]
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 {
@@ -6068,7 +6171,7 @@ fn render_version_report() -> String {
     let git_sha = GIT_SHA.unwrap_or("unknown");
     let target = BUILD_TARGET.unwrap_or("unknown");
     format!(
-        "Claw Code\n  Version          {VERSION}\n  Git SHA          {git_sha}\n  Target           {target}\n  Build date       {DEFAULT_DATE}"
+        "ClawCodex\n  Version          {VERSION}\n  Git SHA          {git_sha}\n  Target           {target}\n  Build date       {DEFAULT_DATE}"
     )
 }
 
@@ -6797,6 +6900,7 @@ fn build_runtime_with_plugin_state(
     );
     feature_config = feature_config.with_completion_verify(merged_completion_verify);
     plugin_registry.initialize()?;
+    let workspace_root_for_tools = session.workspace_root().map(PathBuf::from);
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
     let mut runtime = ConversationRuntime::new_with_features(
@@ -6815,7 +6919,8 @@ fn build_runtime_with_plugin_state(
             emit_output,
             tool_registry.clone(),
             mcp_state.clone(),
-        ),
+            workspace_root_for_tools,
+        )?,
         policy,
         system_prompt,
         &feature_config,
@@ -8167,6 +8272,7 @@ struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
+    tool_execution_context: Option<ToolExecutionContext>,
 }
 
 impl CliToolExecutor {
@@ -8175,14 +8281,17 @@ impl CliToolExecutor {
         emit_output: bool,
         tool_registry: GlobalToolRegistry,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    ) -> Self {
-        Self {
+        workspace_root: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let tool_execution_context = workspace_root.map(ToolExecutionContext::new).transpose()?;
+        Ok(Self {
             renderer: TerminalRenderer::new(),
             emit_output,
             allowed_tools,
             tool_registry,
             mcp_state,
-        }
+            tool_execution_context,
+        })
     }
 
     fn execute_search_tool(&self, value: serde_json::Value) -> Result<String, ToolError> {
@@ -8263,6 +8372,10 @@ impl ToolExecutor for CliToolExecutor {
             self.execute_search_tool(value)
         } else if self.tool_registry.has_runtime_tool(tool_name) {
             self.execute_runtime_tool(tool_name, value)
+        } else if let Some(context) = &self.tool_execution_context {
+            self.tool_registry
+                .execute_with_context(tool_name, &value, context)
+                .map_err(ToolError::new)
         } else {
             self.tool_registry
                 .execute(tool_name, &value)
@@ -8805,6 +8918,21 @@ mod tests {
         }
     }
 
+    fn remove_dir_all_with_retry(path: &Path) {
+        let mut last_error = None;
+        for _ in 0..10 {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    last_error = Some(error);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        panic!("failed to clean {}: {:?}", path.display(), last_error);
+    }
+
     fn write_skill_fixture(root: &Path, name: &str, description: &str) {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir).expect("skill dir should exist");
@@ -8925,7 +9053,7 @@ mod tests {
             Some(value) => std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", value),
             None => std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE"),
         }
-        std::fs::remove_dir_all(root).expect("temp config root should clean up");
+        remove_dir_all_with_retry(&root);
 
         assert_eq!(resolved, PermissionMode::WorkspaceWrite);
     }
@@ -9232,7 +9360,7 @@ mod tests {
             Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
             None => std::env::remove_var("CLAW_CONFIG_HOME"),
         }
-        std::fs::remove_dir_all(root).expect("temp config root should clean up");
+        remove_dir_all_with_retry(&root);
 
         // then
         assert_eq!(direct, "claude-haiku-4-5-20251213");
@@ -10182,6 +10310,23 @@ mod tests {
     }
 
     #[test]
+    fn filtered_tool_specs_defer_specialized_repo_tools() {
+        let filtered = filter_tool_specs(&GlobalToolRegistry::builtin(), None);
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"ToolSearch".to_string()));
+        assert!(names.contains(&"RepoOverview".to_string()));
+        assert!(names.contains(&"RepoSearch".to_string()));
+        assert!(!names.contains(&"RepoImpact".to_string()));
+        assert!(!names.contains(&"RepoTests".to_string()));
+        assert!(!names.contains(&"RepoIndexStatus".to_string()));
+        assert!(!names.contains(&"WorktreeCreate".to_string()));
+        assert!(!names.contains(&"TaskLedgerRead".to_string()));
+    }
+
+    #[test]
     fn permission_policy_uses_plugin_tool_permissions() {
         let feature_config = runtime::RuntimeFeatureConfig::default();
         let policy = permission_policy(
@@ -10960,7 +11105,7 @@ UU conflicted.rs",
         );
 
         std::env::set_current_dir(previous).expect("restore cwd");
-        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+        remove_dir_all_with_retry(&workspace);
     }
 
     #[test]
@@ -10993,7 +11138,7 @@ UU conflicted.rs",
         );
 
         std::env::set_current_dir(previous).expect("restore cwd");
-        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+        remove_dir_all_with_retry(&workspace);
     }
 
     #[test]
@@ -11140,10 +11285,25 @@ UU conflicted.rs",
         let help = render_repl_help();
         assert!(help.contains("Up/Down"));
         assert!(help.contains("Tab"));
+        assert!(help.contains("/order ... /end"));
         assert!(help.contains("Shift+Enter/Ctrl+J"));
         assert!(help.contains("Ctrl-R"));
         assert!(help.contains("Reverse-search prompt history"));
         assert!(help.contains("/history [count]"));
+    }
+
+    #[test]
+    fn finalize_order_multiline_preserves_newlines_as_single_prompt() {
+        let lines = vec![
+            "Objective: build pacman".to_string(),
+            "Path: games/pacman.html".to_string(),
+            "Constraints: HTML/CSS/JavaScript only".to_string(),
+        ];
+        let prompt = super::finalize_order_multiline(&lines).expect("prompt should exist");
+        assert_eq!(
+            prompt,
+            "Objective: build pacman\nPath: games/pacman.html\nConstraints: HTML/CSS/JavaScript only"
+        );
     }
 
     #[test]
@@ -11672,23 +11832,21 @@ UU conflicted.rs",
         fs::create_dir_all(&workspace).expect("workspace");
         let script_path = workspace.join("fixture-mcp.py");
         write_mcp_server_fixture(&script_path);
+        let settings_json = serde_json::json!({
+            "mcpServers": {
+                "alpha": {
+                    "command": "python",
+                    "args": [script_path.to_string_lossy().to_string()]
+                },
+                "broken": {
+                    "command": "python",
+                    "args": ["-c", "import sys; sys.exit(0)"]
+                }
+            }
+        });
         fs::write(
             config_home.join("settings.json"),
-            format!(
-                r#"{{
-                  "mcpServers": {{
-                    "alpha": {{
-                      "command": "python3",
-                      "args": ["{}"]
-                    }},
-                    "broken": {{
-                      "command": "python3",
-                      "args": ["-c", "import sys; sys.exit(0)"]
-                    }}
-                  }}
-                }}"#,
-                script_path.to_string_lossy()
-            ),
+            serde_json::to_string_pretty(&settings_json).expect("settings json should serialize"),
         )
         .expect("write mcp settings");
 
@@ -11710,7 +11868,9 @@ UU conflicted.rs",
             false,
             state.tool_registry.clone(),
             state.mcp_state.clone(),
-        );
+            None,
+        )
+        .expect("CLI tool executor should initialize");
 
         let tool_output = executor
             .execute("mcp__alpha__echo", r#"{"text":"hello"}"#)
@@ -11808,7 +11968,9 @@ UU conflicted.rs",
             false,
             state.tool_registry.clone(),
             state.mcp_state.clone(),
-        );
+            None,
+        )
+        .expect("CLI tool executor should initialize");
 
         let search_output = executor
             .execute("ToolSearch", r#"{"query":"remote","max_results":5}"#)

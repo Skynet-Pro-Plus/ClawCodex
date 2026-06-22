@@ -42,6 +42,10 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
+const MAX_GIT_DIFF_CHARS: usize = 8_000;
+const MAX_GIT_STATUS_CHARS: usize = 3_500;
+const MAX_GIT_CHANGED_FILES_SECTION_CHARS: usize = 1_500;
+const MAX_PROJECT_CONTEXT_CHARS: usize = 18_000;
 
 /// Contents of an instruction file included in prompt construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +194,7 @@ impl SystemPromptBuilder {
                 self.os_version.as_deref().unwrap_or("unknown")
             ),
         ]));
+        lines.extend(prepend_bullets(shell_backend_lines()));
         lines.join("\n")
     }
 }
@@ -198,6 +203,40 @@ impl SystemPromptBuilder {
 #[must_use]
 pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
     items.into_iter().map(|item| format!(" - {item}")).collect()
+}
+
+/// Describes the active bash-tool backend and its command/path conventions so
+/// the model never has to guess which shell dialect it is talking to.
+fn shell_backend_lines() -> Vec<String> {
+    let (label, program) = crate::bash::active_shell_backend();
+    let mut lines = vec![format!(
+        "Shell backend for the bash tool: {label} ({program}). WSL is never used."
+    )];
+    match label {
+        "git-bash" => {
+            lines.push(
+                "Bash paths: Windows drives are /c/..., /d/... (never /mnt/...). \
+                 Native D:\\... paths work in the file tools. Use `python` (Windows \
+                 Python), not python3."
+                    .to_string(),
+            );
+        }
+        "powershell" => {
+            lines.push(
+                "Commands run in Windows PowerShell: use ; not &&, $null not /dev/null, \
+                 Get-Content not head/tail/cat, Select-String not grep. Linux-only \
+                 commands are rejected before execution with a translation hint."
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    lines.push(
+        "Create or edit files with the write_file/edit_file tools — never shell \
+         heredocs or echo redirection."
+            .to_string(),
+    );
+    lines
 }
 
 fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
@@ -254,23 +293,73 @@ fn read_git_status(cwd: &Path) -> Option<String> {
 }
 
 fn read_git_diff(cwd: &Path) -> Option<String> {
-    let mut sections = Vec::new();
-
     let staged = read_git_output(cwd, &["diff", "--cached"])?;
+    let unstaged = read_git_output(cwd, &["diff"])?;
+    let mut sections = Vec::new();
     if !staged.trim().is_empty() {
         sections.push(format!("Staged changes:\n{}", staged.trim_end()));
     }
-
-    let unstaged = read_git_output(cwd, &["diff"])?;
     if !unstaged.trim().is_empty() {
         sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
     }
-
     if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n\n"))
+        return None;
     }
+    let full_diff = sections.join("\n\n");
+    if full_diff.chars().count() <= MAX_GIT_DIFF_CHARS {
+        return Some(full_diff);
+    }
+
+    let staged_stats = read_git_output(cwd, &["diff", "--cached", "--stat"]).unwrap_or_default();
+    let unstaged_stats = read_git_output(cwd, &["diff", "--stat"]).unwrap_or_default();
+    let changed_files = collect_changed_files(
+        cwd,
+        &[
+            &["diff", "--cached", "--name-only"],
+            &["diff", "--name-only"],
+        ],
+    );
+    let mut rendered = vec![
+        format!(
+            "Diff content omitted: total {total} chars, omitted {omitted} chars (budget {budget}).",
+            total = full_diff.chars().count(),
+            omitted = full_diff.chars().count().saturating_sub(MAX_GIT_DIFF_CHARS),
+            budget = MAX_GIT_DIFF_CHARS
+        ),
+        "Use git/repository tools (for example, `bash` with `git diff`, `read_file`, `RepoSearch`, or `RepoOverview`) to inspect the full patch when needed.".to_string(),
+    ];
+    if !staged_stats.trim().is_empty() {
+        rendered.push(String::new());
+        rendered.push("Staged diff stats:".to_string());
+        rendered.push(staged_stats.trim_end().to_string());
+    }
+    if !unstaged_stats.trim().is_empty() {
+        rendered.push(String::new());
+        rendered.push("Unstaged diff stats:".to_string());
+        rendered.push(unstaged_stats.trim_end().to_string());
+    }
+    if !changed_files.is_empty() {
+        rendered.push(String::new());
+        rendered.push("Changed files:".to_string());
+        let rendered_files = changed_files.join("\n");
+        let file_budget = MAX_GIT_CHANGED_FILES_SECTION_CHARS;
+        let file_slice = truncate_at_utf8_boundary(&rendered_files, file_budget);
+        let omitted_chars = rendered_files
+            .chars()
+            .count()
+            .saturating_sub(file_slice.chars().count());
+        let shown_count = file_slice.lines().count();
+        for line in file_slice.lines() {
+            rendered.push(format!("  {line}"));
+        }
+        if omitted_chars > 0 {
+            rendered.push(format!(
+                "  ... omitted {omitted_chars} file-list chars and {} files.",
+                changed_files.len().saturating_sub(shown_count)
+            ));
+        }
+    }
+    Some(rendered.join("\n"))
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -301,7 +390,7 @@ fn render_project_context(project_context: &ProjectContext) -> String {
     if let Some(status) = &project_context.git_status {
         lines.push(String::new());
         lines.push("Git status snapshot:".to_string());
-        lines.push(status.clone());
+        lines.push(render_git_status(status));
     }
     if let Some(ref gc) = project_context.git_context {
         if !gc.recent_commits.is_empty() {
@@ -324,7 +413,69 @@ fn render_project_context(project_context: &ProjectContext) -> String {
             lines.push(rendered);
         }
     }
-    lines.join("\n")
+    let rendered = lines.join("\n");
+    if rendered.chars().count() <= MAX_PROJECT_CONTEXT_CHARS {
+        return rendered;
+    }
+
+    let truncated = truncate_at_utf8_boundary(&rendered, MAX_PROJECT_CONTEXT_CHARS);
+    let omitted_chars = rendered
+        .chars()
+        .count()
+        .saturating_sub(truncated.chars().count());
+    format!(
+        "{truncated}\n\n[project-context truncated: omitted {omitted_chars} chars after reaching {MAX_PROJECT_CONTEXT_CHARS}-char budget]"
+    )
+}
+
+fn collect_changed_files(cwd: &Path, commands: &[&[&str]]) -> Vec<String> {
+    let mut files = Vec::new();
+    for args in commands {
+        let Some(output) = read_git_output(cwd, args) else {
+            continue;
+        };
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !files.iter().any(|existing| existing == trimmed) {
+                files.push(trimmed.to_string());
+            }
+        }
+    }
+    files
+}
+
+fn render_git_status(status: &str) -> String {
+    if status.chars().count() <= MAX_GIT_STATUS_CHARS {
+        return status.to_string();
+    }
+    let truncated = truncate_at_utf8_boundary(status, MAX_GIT_STATUS_CHARS);
+    let omitted_chars = status
+        .chars()
+        .count()
+        .saturating_sub(truncated.chars().count());
+    let omitted_files = status
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.len() > 3
+                && !trimmed.starts_with("##")
+                && matches!(
+                    trimmed.chars().next(),
+                    Some('M' | 'A' | 'D' | 'R' | 'C' | 'U' | '?')
+                )
+        })
+        .count()
+        .saturating_sub(truncated.lines().count().saturating_sub(1));
+    format!(
+        "{truncated}\n... [git status truncated: omitted {omitted_chars} chars and approximately {omitted_files} entries]"
+    )
+}
+
+fn truncate_at_utf8_boundary(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    content.chars().take(max_chars).collect()
 }
 
 fn render_instruction_files(files: &[ContextFile]) -> String {
@@ -498,6 +649,7 @@ fn get_simple_doing_tasks_section() -> String {
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
+        "On large unfamiliar repositories, start with RepoOverview then RepoSearch (bounded results), follow with LSP for exact definitions/references, and only then read targeted file slices before editing.".to_string(),
         "When the user asks you to create, modify, or launch code or project files, use the available tools to do that work when the intent is clear and the action is low-risk. Ask only when ambiguity or risk materially affects correctness or safety. Do not satisfy requests by only pasting code in the chat when a real file write or launch is possible. For GUI or window launches, prefer a background launch so the app can keep running while you return control to the user.".to_string(),
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
@@ -521,9 +673,10 @@ fn get_actions_section() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_blank_lines, display_context_path, normalize_instruction_content,
-        render_instruction_content, render_instruction_files, truncate_instruction_content,
-        ContextFile, ProjectContext, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+        collapse_blank_lines, display_context_path, normalize_instruction_content, read_git_diff,
+        render_instruction_content, render_instruction_files, truncate_at_utf8_boundary,
+        truncate_instruction_content, ContextFile, ProjectContext, SystemPromptBuilder,
+        MAX_GIT_DIFF_CHARS, MAX_PROJECT_CONTEXT_CHARS, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     };
     use crate::config::ConfigLoader;
     use std::fs;
@@ -903,5 +1056,81 @@ mod tests {
         assert!(rendered.contains("# Claude instructions"));
         assert!(rendered.contains("scope: /tmp/project"));
         assert!(rendered.contains("Project rules"));
+    }
+
+    #[test]
+    fn truncates_at_utf8_character_boundaries() {
+        let content = "alpha🙂beta";
+        let truncated = truncate_at_utf8_boundary(content, 6);
+        assert_eq!(truncated, "alpha🙂");
+    }
+
+    #[test]
+    fn large_git_diff_is_summarized_with_notice_and_stats() {
+        let _guard = env_lock();
+        ensure_valid_cwd();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init should run");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(&root)
+            .status()
+            .expect("git config email should run");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Runtime Prompt Tests"])
+            .current_dir(&root)
+            .status()
+            .expect("git config name should run");
+        fs::write(root.join("tracked.txt"), "base\n").expect("write tracked file");
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add should run");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git commit should run");
+        fs::write(
+            root.join("tracked.txt"),
+            format!("base\n{}\n", "x".repeat(MAX_GIT_DIFF_CHARS * 4)),
+        )
+        .expect("rewrite tracked file");
+
+        let rendered = read_git_diff(&root).expect("git diff should exist");
+        assert!(rendered.contains("Diff content omitted"));
+        assert!(
+            rendered.contains("Staged diff stats:") || rendered.contains("Unstaged diff stats:")
+        );
+        assert!(rendered.contains("Changed files:"));
+        assert!(rendered.contains("tracked.txt"));
+        assert!(rendered.contains("Use git/repository tools"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn project_context_budget_limits_extreme_diff_payloads() {
+        let context = ProjectContext {
+            cwd: PathBuf::from("/tmp/project"),
+            current_date: "2026-03-31".to_string(),
+            git_status: Some("## main\n M games/pacman.html".to_string()),
+            git_diff: Some("x".repeat(500_000)),
+            git_context: None,
+            instruction_files: Vec::new(),
+        };
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_project_context(context)
+            .render();
+        assert!(rendered.chars().count() <= 25_000);
+        assert!(rendered.chars().count() < MAX_PROJECT_CONTEXT_CHARS + 10_000);
+        assert!(rendered.contains("project-context truncated"));
     }
 }

@@ -204,6 +204,35 @@ mod tests {
         }
     }
 
+    struct EmptyRepoRootGuard {
+        _env: EnvVarGuard,
+        path: std::path::PathBuf,
+    }
+
+    impl EmptyRepoRootGuard {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "api-client-empty-repo-root-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_nanos())
+            ));
+            std::fs::create_dir_all(&path).expect("create empty repo root");
+            let path_string = path.to_string_lossy().into_owned();
+            Self {
+                _env: EnvVarGuard::set("CLAW_REPO_ROOT", Some(&path_string)),
+                path,
+            }
+        }
+    }
+
+    impl Drop for EmptyRepoRootGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     #[test]
     fn dashscope_model_uses_dashscope_config_not_openai() {
         // Regression: qwen-plus was being routed to OpenAiCompatConfig::openai()
@@ -211,6 +240,7 @@ mod tests {
         // use OpenAiCompatConfig::dashscope() which reads DASHSCOPE_API_KEY and
         // points at dashscope.aliyuncs.com.
         let _lock = env_lock();
+        let _repo_root = EmptyRepoRootGuard::new("dashscope-routing");
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", Some("test-dashscope-key"));
         let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
 

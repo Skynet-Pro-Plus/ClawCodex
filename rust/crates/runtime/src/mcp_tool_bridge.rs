@@ -13,7 +13,7 @@
 //! connect to MCP servers and invoke their capabilities.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::mcp::mcp_tool_name;
 use crate::mcp_stdio::McpServerManager;
@@ -89,6 +89,12 @@ impl McpToolRegistry {
         self.manager.set(manager)
     }
 
+    fn inner(&self) -> MutexGuard<'_, HashMap<String, McpServerState>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn register_server(
         &self,
         server_name: &str,
@@ -97,7 +103,7 @@ impl McpToolRegistry {
         resources: Vec<McpResourceInfo>,
         server_info: Option<String>,
     ) {
-        let mut inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let mut inner = self.inner();
         inner.insert(
             server_name.to_owned(),
             McpServerState {
@@ -112,17 +118,17 @@ impl McpToolRegistry {
     }
 
     pub fn get_server(&self, server_name: &str) -> Option<McpServerState> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         inner.get(server_name).cloned()
     }
 
     pub fn list_servers(&self) -> Vec<McpServerState> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         inner.values().cloned().collect()
     }
 
     pub fn list_resources(&self, server_name: &str) -> Result<Vec<McpResourceInfo>, String> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         match inner.get(server_name) {
             Some(state) => {
                 if state.status != McpConnectionStatus::Connected {
@@ -138,7 +144,7 @@ impl McpToolRegistry {
     }
 
     pub fn read_resource(&self, server_name: &str, uri: &str) -> Result<McpResourceInfo, String> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         let state = inner
             .get(server_name)
             .ok_or_else(|| format!("server '{}' not found", server_name))?;
@@ -159,7 +165,7 @@ impl McpToolRegistry {
     }
 
     pub fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolInfo>, String> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         match inner.get(server_name) {
             Some(state) => {
                 if state.status != McpConnectionStatus::Connected {
@@ -243,7 +249,7 @@ impl McpToolRegistry {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         let state = inner
             .get(server_name)
             .ok_or_else(|| format!("server '{}' not found", server_name))?;
@@ -283,7 +289,7 @@ impl McpToolRegistry {
         server_name: &str,
         status: McpConnectionStatus,
     ) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let mut inner = self.inner();
         let state = inner
             .get_mut(server_name)
             .ok_or_else(|| format!("server '{}' not found", server_name))?;
@@ -293,14 +299,14 @@ impl McpToolRegistry {
 
     /// Disconnect / remove a server.
     pub fn disconnect(&self, server_name: &str) -> Option<McpServerState> {
-        let mut inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let mut inner = self.inner();
         inner.remove(server_name)
     }
 
     /// Number of registered servers.
     #[must_use]
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().expect("mcp registry lock poisoned");
+        let inner = self.inner();
         inner.len()
     }
 
@@ -582,6 +588,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "stdio MCP fixture is POSIX-oriented")]
     fn given_connected_server_with_manager_when_calling_tool_then_it_returns_live_result() {
         let script_path = write_bridge_mcp_server_script();
         let root = script_path.parent().expect("script parent");

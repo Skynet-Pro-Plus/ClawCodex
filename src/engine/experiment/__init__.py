@@ -13,6 +13,12 @@ from .benchmark import (
     BenchmarkRunner,
     run_benchmark,
 )
+from .orchestrator_benchmarks import (
+    BENCHMARK_TASKS,
+    OrchestratorBenchmarkTask,
+    list_orchestrator_benchmarks,
+    run_orchestrator_benchmark,
+)
 
 __all__ = [
     # Experiments
@@ -25,5 +31,9 @@ __all__ = [
     "Benchmark",
     "BenchmarkResult",
     "BenchmarkRunner",
+    "BENCHMARK_TASKS",
+    "OrchestratorBenchmarkTask",
+    "list_orchestrator_benchmarks",
     "run_benchmark",
+    "run_orchestrator_benchmark",
 ]

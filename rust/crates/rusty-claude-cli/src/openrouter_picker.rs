@@ -1,4 +1,4 @@
-//! Interactive OpenRouter model list for portable installs (mirrors launch.ps1).
+//! Interactive `OpenRouter` model list for portable installs (mirrors launch.ps1).
 
 use std::io::{self, IsTerminal, Write};
 
@@ -11,6 +11,7 @@ pub const OPENROUTER_DEFAULT_MODEL_ID: &str = "openai/gpt-4.1-mini";
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const MIN_CLAW_CONTEXT_TOKENS: u32 = 128_000;
+const MAX_RENDER_FIELD_CHARS: usize = 180;
 
 #[derive(Debug, Clone)]
 pub struct OpenRouterModelRow {
@@ -28,9 +29,14 @@ struct ModelsEnvelope {
     data: Vec<Value>,
 }
 
-/// Whether the REPL should offer the OpenRouter model picker before connecting.
+/// Whether the REPL should offer the `OpenRouter` model picker before connecting.
 #[must_use]
 pub fn should_run_openrouter_repl_model_picker(model_explicit: bool) -> bool {
+    openrouter_repl_model_picker_skip_reason(model_explicit).is_none()
+}
+
+#[must_use]
+pub fn openrouter_repl_model_picker_skip_reason(model_explicit: bool) -> Option<String> {
     let skip_env = std::env::var("CLAW_SKIP_OPENROUTER_MODEL_PICKER")
         .ok()
         .as_deref()
@@ -42,18 +48,25 @@ pub fn should_run_openrouter_repl_model_picker(model_explicit: bool) -> bool {
     let base_is_openrouter = base.contains("openrouter");
 
     if model_explicit {
-        return false;
+        return Some("model explicitly set by CLI flags".to_string());
     }
     if skip_env {
-        return false;
+        return Some("CLAW_SKIP_OPENROUTER_MODEL_PICKER=1".to_string());
     }
     if !stdin_terminal || !stdout_terminal {
-        return false;
+        return Some(format!(
+            "non-interactive terminal (stdin_terminal={stdin_terminal}, stdout_terminal={stdout_terminal})"
+        ));
     }
     if !has_key {
-        return false;
+        return Some("OPENAI_API_KEY is missing or empty".to_string());
     }
-    base_is_openrouter
+    if !base_is_openrouter {
+        return Some(format!(
+            "OPENAI_BASE_URL does not point to OpenRouter (resolved base: {base})"
+        ));
+    }
+    None
 }
 
 fn provider_title_case(provider_id: &str) -> String {
@@ -68,6 +81,19 @@ fn provider_title_case(provider_id: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn sanitize_for_console(value: &str) -> String {
+    let filtered = value
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\t')
+        .take(MAX_RENDER_FIELD_CHARS)
+        .collect::<String>();
+    if filtered.chars().count() >= MAX_RENDER_FIELD_CHARS {
+        format!("{filtered}...")
+    } else {
+        filtered
+    }
 }
 
 fn provider_display_name(provider_id: &str) -> String {
@@ -230,7 +256,7 @@ fn parse_model_row(raw: &Value) -> Option<OpenRouterModelRow> {
         .to_string();
     let context_length = raw
         .get("context_length")
-        .and_then(|v| v.as_u64())
+        .and_then(Value::as_u64)
         .and_then(|n| u32::try_from(n).ok());
     let modality = raw
         .pointer("/architecture/modality")
@@ -262,23 +288,46 @@ fn fetch_openrouter_models(api_key: &str) -> Result<Vec<OpenRouterModelRow>, Str
         .send()
         .map_err(|e| format!("OpenRouter models request failed: {e}"))?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        eprintln!(
+            "Warning: OpenRouter rejected the saved key (HTTP {}). Loading public model list so selection can continue.",
+            status.as_u16()
+        );
+        let public_response = client
+            .get(OPENROUTER_MODELS_URL)
+            .send()
+            .map_err(|e| format!("OpenRouter public models request failed: {e}"))?;
+        if !public_response.status().is_success() {
+            return Err(format!(
+                "OpenRouter public models HTTP {}: {}",
+                public_response.status().as_u16(),
+                public_response.text().unwrap_or_default()
+            ));
+        }
+        return parse_model_rows(public_response);
+    }
+
+    if !status.is_success() {
         return Err(format!(
             "OpenRouter models HTTP {}: {}",
-            response.status().as_u16(),
+            status.as_u16(),
             response.text().unwrap_or_default()
         ));
     }
 
+    parse_model_rows(response)
+}
+
+fn parse_model_rows(
+    response: reqwest::blocking::Response,
+) -> Result<Vec<OpenRouterModelRow>, String> {
     let envelope: ModelsEnvelope = response
         .json()
         .map_err(|e| format!("OpenRouter models JSON: {e}"))?;
 
-    let mut rows: Vec<OpenRouterModelRow> = envelope
-        .data
-        .iter()
-        .filter_map(|raw| parse_model_row(raw))
-        .collect();
+    let mut rows: Vec<OpenRouterModelRow> =
+        envelope.data.iter().filter_map(parse_model_row).collect();
 
     rows.sort_by(|a, b| {
         a.provider_display
@@ -340,7 +389,8 @@ pub fn run_openrouter_model_picker() -> Result<(String, Option<u32>), String> {
         };
         eprintln!(
             "  [{display_index}] {} ({}{ctx}{pricing}{modality})",
-            model.id, model.name
+            sanitize_for_console(&model.id),
+            sanitize_for_console(&model.name)
         );
         display_index += 1;
     }

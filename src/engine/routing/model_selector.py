@@ -8,6 +8,31 @@ from typing import Any
 
 # Available models with their capabilities and costs
 MODELS = {
+    # OpenRouter role defaults
+    "anthropic/claude-opus-4.1": {
+        "provider": "openrouter",
+        "context_window": 200000,
+        "cost_per_1k_input": 0.015,
+        "cost_per_1k_output": 0.075,
+        "strengths": ["reasoning", "analysis", "code", "review"],
+        "max_output": 8192,
+    },
+    "anthropic/claude-sonnet-4": {
+        "provider": "openrouter",
+        "context_window": 200000,
+        "cost_per_1k_input": 0.003,
+        "cost_per_1k_output": 0.015,
+        "strengths": ["reasoning", "analysis", "code", "debugging"],
+        "max_output": 8192,
+    },
+    "openai/gpt-4.1-mini": {
+        "provider": "openrouter",
+        "context_window": 128000,
+        "cost_per_1k_input": 0.0004,
+        "cost_per_1k_output": 0.0016,
+        "strengths": ["fast", "coding", "cheap"],
+        "max_output": 8192,
+    },
     # High reasoning models
     "claude-opus-4": {
         "provider": "anthropic",
@@ -95,6 +120,35 @@ MODELS = {
 }
 
 
+ROLE_PRESETS = {
+    "planner": {
+        "model": "anthropic/claude-opus-4.1",
+        "fallback_model": "anthropic/claude-sonnet-4",
+        "reasoning": "Planner role uses the strongest reasoning model for architecture and sequencing",
+    },
+    "coder": {
+        "model": "openai/gpt-4.1-mini",
+        "fallback_model": "anthropic/claude-sonnet-4",
+        "reasoning": "Coder role uses a fast coding model with a stronger fallback",
+    },
+    "debugger": {
+        "model": "anthropic/claude-sonnet-4",
+        "fallback_model": "openai/gpt-4.1-mini",
+        "reasoning": "Debugger role balances strong reasoning with lower operating cost",
+    },
+    "tester": {
+        "model": "openai/gpt-4.1-mini",
+        "fallback_model": "anthropic/claude-sonnet-4",
+        "reasoning": "Tester role uses a fast, low-cost coding model for verification interpretation",
+    },
+    "reviewer": {
+        "model": "anthropic/claude-opus-4.1",
+        "fallback_model": "anthropic/claude-sonnet-4",
+        "reasoning": "Reviewer role uses strict reasoning for risk and regression review",
+    },
+}
+
+
 @dataclass
 class ModelRecommendation:
     """A model recommendation.
@@ -177,8 +231,9 @@ class ModelSelector:
         "formatting": "tester",
     }
     
-    def __init__(self, prefer_cheap: bool = False):
+    def __init__(self, prefer_cheap: bool = False, role_overrides: dict[str, str] | None = None):
         self.prefer_cheap = prefer_cheap
+        self.role_overrides = role_overrides or {}
     
     def recommend(
         self,
@@ -198,6 +253,18 @@ class ModelSelector:
         Returns:
             ModelRecommendation
         """
+        if stage in ROLE_PRESETS and not self.prefer_cheap:
+            preset = ROLE_PRESETS[stage]
+            model = self.role_overrides.get(stage, preset["model"])
+            model_info = MODELS.get(model, MODELS[preset["model"]])
+            return ModelRecommendation(
+                model=model,
+                fallback_model=preset["fallback_model"],
+                reasoning=preset["reasoning"],
+                estimated_cost=model_info["cost_per_1k_input"] + model_info["cost_per_1k_output"],
+                strengths=model_info["strengths"],
+            )
+
         # Map task type to stage if needed
         if task_type and stage == "coder":
             mapped = self.TASK_TYPE_MAPPINGS.get(task_type.lower())

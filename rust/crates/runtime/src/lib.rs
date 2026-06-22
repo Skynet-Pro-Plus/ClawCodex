@@ -151,9 +151,9 @@ pub use sandbox::{
 };
 pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,
-    SessionFork, SessionPromptEntry,
+    SessionFork, SessionPromptEntry, SessionTaskLedger, SessionTaskLedgerUpdate,
 };
-pub use sse::{IncrementalSseParser, SseEvent};
+pub use sse::{IncrementalSseParser, SseEvent, SseParseError};
 pub use stale_base::{
     check_base_commit, format_stale_base_warning, read_claw_base_file, resolve_expected_base,
     BaseCommitSource, BaseCommitState,
