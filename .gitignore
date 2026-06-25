@@ -43,6 +43,7 @@ bin/windows/claw.exe.*.bak
 /nul
 
 # Local Android SDK / build sandboxes (re-download or rebuild as needed)
+moodly-app/
 android-tools/
 android/
 pacman-android/
