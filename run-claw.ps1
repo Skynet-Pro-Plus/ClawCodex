@@ -30,6 +30,8 @@ $DeepSeekBase = "https://api.deepseek.com"
 $DefaultDeepSeekModel = "deepseek-v4-flash"
 $KimiBase = "https://api.moonshot.ai/v1"
 $DefaultKimiModel = "kimi-k2.7-code"
+$DefaultLmStudioBase = "http://127.0.0.1:1234/v1"
+$DefaultLmStudioApiKey = "lm-studio"
 
 function Read-RepoDotEnv {
     param([string]$Path)
@@ -61,7 +63,10 @@ function Is-PlaceholderKey {
         ($Value -eq "YOUR_ZAI_KEY_HERE") -or
         ($Value -eq "YOUR_DEEPSEEK_KEY_HERE") -or
         ($Value -eq "YOUR_KIMI_KEY_HERE") -or
-        ($Value -eq "YOUR_MOONSHOT_KEY_HERE")
+        ($Value -eq "YOUR_MOONSHOT_KEY_HERE") -or
+        ($Value -eq "YOUR_LMSTUDIO_BASE_URL_HERE") -or
+        ($Value -eq "YOUR_LMSTUDIO_API_KEY_HERE") -or
+        ($Value -eq "YOUR_LOCAL_MODEL_HERE")
 }
 
 function Test-ArgsIncludeModel {
@@ -171,6 +176,29 @@ function Apply-ProviderFromDotEnv {
         return $ClawArgs
     }
 
+    if ($provider -eq "local") {
+        $base = $DotEnv["LMSTUDIO_BASE_URL"]
+        if (Is-PlaceholderKey $base) { $base = $DotEnv["OPENAI_BASE_URL"] }
+        if (Is-PlaceholderKey $base) { $base = $DefaultLmStudioBase }
+        $key = $DotEnv["LMSTUDIO_API_KEY"]
+        if (Is-PlaceholderKey $key) { $key = $DotEnv["OPENAI_API_KEY"] }
+        if (Is-PlaceholderKey $key) { $key = $DefaultLmStudioApiKey }
+        $env:OPENAI_BASE_URL = $base
+        $env:OPENAI_API_KEY = $key
+        $env:LMSTUDIO_BASE_URL = $base
+        $env:LMSTUDIO_API_KEY = $key
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+        $env:CLAW_PROVIDER = "local"
+
+        if (-not (Test-ArgsIncludeModel -ClawArgs $ClawArgs)) {
+            $model = $DotEnv["CLAW_LOCAL_MODEL"]
+            if (Is-PlaceholderKey $model) { $model = "local-model" }
+            return @("--model", $model) + $ClawArgs
+        }
+        return $ClawArgs
+    }
+
     Remove-Item Env:CLAW_SKIP_OPENROUTER_MODEL_PICKER -ErrorAction SilentlyContinue
     Remove-Item Env:CLAW_NO_CREDENTIAL_PROMPT -ErrorAction SilentlyContinue
     Remove-Item Env:ZAI_API_KEY -ErrorAction SilentlyContinue
@@ -214,13 +242,18 @@ if ($provider -eq "cerebras") {
     if (Is-PlaceholderKey $kKey) { $kKey = $dotenv["MOONSHOT_API_KEY"] }
     if (Is-PlaceholderKey $kKey) { $kKey = $dotenv["OPENAI_API_KEY"] }
     $hasCreds = -not (Is-PlaceholderKey $kKey)
+} elseif ($provider -eq "local") {
+    $base = $dotenv["LMSTUDIO_BASE_URL"]
+    if (Is-PlaceholderKey $base) { $base = $dotenv["OPENAI_BASE_URL"] }
+    $model = $dotenv["CLAW_LOCAL_MODEL"]
+    $hasCreds = (-not (Is-PlaceholderKey $base)) -and (-not (Is-PlaceholderKey $model))
 } else {
     $hasCreds = -not (Is-PlaceholderKey $dotenv["OPENAI_API_KEY"])
 }
 
 if (-not $hasCreds) {
     Write-Host "No saved credentials for provider '$provider'." -ForegroundColor Yellow
-    Write-Host "  Run START-CLAW.bat to choose OpenRouter, Cerebras, Z.ai, DeepSeek, or Kimi and enter a key." -ForegroundColor Yellow
+    Write-Host "  Run START-CLAW.bat to choose OpenRouter, Cerebras, Z.ai, DeepSeek, Kimi, or Local (LM Studio) and enter settings." -ForegroundColor Yellow
     Write-Host ""
 }
 

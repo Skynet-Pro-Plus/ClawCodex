@@ -1,16 +1,17 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Interactive ClawCodex launcher: choose OpenRouter, Cerebras, Z.ai, DeepSeek, or Kimi, validate keys, start claw REPL.
+  Interactive ClawCodex launcher: choose OpenRouter, Cerebras, Z.ai, DeepSeek, Kimi, or Local (LM Studio), validate settings, start claw REPL.
 
 .DESCRIPTION
-  1. Prompt for provider (OpenRouter, Cerebras, Z.ai, DeepSeek, or Kimi).
+  1. Prompt for provider (OpenRouter, Cerebras, Z.ai, DeepSeek, Kimi, or Local/LM Studio).
   2. Look for the provider key in repo-root .env; prompt with hidden input if missing/invalid.
   3. OpenRouter + valid key: run claw doctor, then REPL with tool-capable model picker.
   4. Cerebras/Z.ai/DeepSeek/Kimi + valid key: pick a model from live provider models, then REPL with that model.
+  5. Local/LM Studio: prompt for LM Studio settings when missing; reuse saved settings when available.
 #>
 param(
-    [ValidateSet("openrouter", "cerebras", "zai", "deepseek", "kimi")]
+    [ValidateSet("openrouter", "cerebras", "zai", "deepseek", "kimi", "local")]
     [string]$Provider,
     [switch]$SkipDoctor
 )
@@ -32,6 +33,8 @@ $DeepSeekBase = "https://api.deepseek.com"
 $DefaultDeepSeekModel = "deepseek-v4-flash"
 $KimiBase = "https://api.moonshot.ai/v1"
 $DefaultKimiModel = "kimi-k2.7-code"
+$DefaultLmStudioBase = "http://127.0.0.1:1234/v1"
+$DefaultLmStudioApiKey = "lm-studio"
 
 function Read-RepoDotEnv {
     param([string]$Path)
@@ -64,7 +67,10 @@ function Is-PlaceholderKey {
         ($Value -eq "YOUR_ZAI_KEY_HERE") -or
         ($Value -eq "YOUR_DEEPSEEK_KEY_HERE") -or
         ($Value -eq "YOUR_KIMI_KEY_HERE") -or
-        ($Value -eq "YOUR_MOONSHOT_KEY_HERE")
+        ($Value -eq "YOUR_MOONSHOT_KEY_HERE") -or
+        ($Value -eq "YOUR_LMSTUDIO_BASE_URL_HERE") -or
+        ($Value -eq "YOUR_LMSTUDIO_API_KEY_HERE") -or
+        ($Value -eq "YOUR_LOCAL_MODEL_HERE")
 }
 
 function Ensure-DotEnvExists {
@@ -89,7 +95,10 @@ function Ensure-DotEnvExists {
         "KIMI_BASE_URL=$KimiBase",
         "KIMI_API_KEY=YOUR_KIMI_KEY_HERE",
         "MOONSHOT_API_KEY=YOUR_MOONSHOT_KEY_HERE",
-        "CLAW_KIMI_MODEL=$DefaultKimiModel"
+        "CLAW_KIMI_MODEL=$DefaultKimiModel",
+        "LMSTUDIO_BASE_URL=$DefaultLmStudioBase",
+        "LMSTUDIO_API_KEY=$DefaultLmStudioApiKey",
+        "CLAW_LOCAL_MODEL=YOUR_LOCAL_MODEL_HERE"
     ) | Set-Content -LiteralPath $DotEnvPath -Encoding UTF8
 }
 
@@ -123,7 +132,10 @@ function Save-ProviderConfig {
         [string]$DeepSeekKey,
         [string]$DeepSeekModel,
         [string]$KimiKey,
-        [string]$KimiModel
+        [string]$KimiModel,
+        [string]$LocalBaseUrl,
+        [string]$LocalApiKey,
+        [string]$LocalModel
     )
 
     Ensure-DotEnvExists
@@ -172,6 +184,18 @@ function Save-ProviderConfig {
         if (-not [string]::IsNullOrWhiteSpace($KimiModel)) {
             Set-DotEnvLine -Lines $lines -Name "CLAW_KIMI_MODEL" -Value $KimiModel
         }
+    } elseif ($SelectedProvider -eq "local") {
+        if (-not [string]::IsNullOrWhiteSpace($LocalBaseUrl)) {
+            Set-DotEnvLine -Lines $lines -Name "LMSTUDIO_BASE_URL" -Value $LocalBaseUrl
+            Set-DotEnvLine -Lines $lines -Name "OPENAI_BASE_URL" -Value $LocalBaseUrl
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LocalApiKey)) {
+            Set-DotEnvLine -Lines $lines -Name "LMSTUDIO_API_KEY" -Value $LocalApiKey
+            Set-DotEnvLine -Lines $lines -Name "OPENAI_API_KEY" -Value $LocalApiKey
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LocalModel)) {
+            Set-DotEnvLine -Lines $lines -Name "CLAW_LOCAL_MODEL" -Value $LocalModel
+        }
     } else {
         if (-not (Is-PlaceholderKey $OpenRouterKey)) {
             Set-DotEnvLine -Lines $lines -Name "OPENAI_BASE_URL" -Value $OpenRouterBase
@@ -183,15 +207,50 @@ function Save-ProviderConfig {
     [System.IO.File]::WriteAllLines($DotEnvPath, $lines.ToArray(), $utf8NoBom)
 }
 
+function Get-LocalBaseUrlFromDotEnv {
+    param([hashtable]$DotEnv)
+    $base = $DotEnv["LMSTUDIO_BASE_URL"]
+    if (Is-PlaceholderKey $base) {
+        $base = $DotEnv["OPENAI_BASE_URL"]
+    }
+    if (Is-PlaceholderKey $base) { return $null }
+    return $base.Trim().TrimEnd("/")
+}
+
+function Get-LocalApiKeyFromDotEnv {
+    param([hashtable]$DotEnv)
+    $key = $DotEnv["LMSTUDIO_API_KEY"]
+    if (Is-PlaceholderKey $key) {
+        $key = $DotEnv["OPENAI_API_KEY"]
+    }
+    if (Is-PlaceholderKey $key) { return $DefaultLmStudioApiKey }
+    return $key.Trim()
+}
+
+function Get-LocalModelFromDotEnv {
+    param([hashtable]$DotEnv)
+    $model = $DotEnv["CLAW_LOCAL_MODEL"]
+    if (Is-PlaceholderKey $model) { return $null }
+    return $model.Trim()
+}
+
+function Test-HasSavedLocalSettings {
+    param([hashtable]$DotEnv)
+    $base = Get-LocalBaseUrlFromDotEnv -DotEnv $DotEnv
+    $model = Get-LocalModelFromDotEnv -DotEnv $DotEnv
+    return (-not [string]::IsNullOrWhiteSpace($base)) -and (-not [string]::IsNullOrWhiteSpace($model))
+}
+
 function Select-Provider {
     $dotenv = Read-RepoDotEnv -Path $DotEnvPath
     $last = $dotenv["CLAW_PROVIDER"]
-    if ($last -ne "cerebras" -and $last -ne "zai" -and $last -ne "deepseek" -and $last -ne "kimi") { $last = "openrouter" }
+    if ($last -ne "cerebras" -and $last -ne "zai" -and $last -ne "deepseek" -and $last -ne "kimi" -and $last -ne "local") { $last = "openrouter" }
     $defaultChoice = switch ($last) {
         "cerebras" { "2" }
         "zai" { "3" }
         "deepseek" { "4" }
         "kimi" { "5" }
+        "local" { "6" }
         default { "1" }
     }
 
@@ -202,6 +261,7 @@ function Select-Provider {
     Write-Host "  [3] Z.ai        (pick a GLM model from your account, then start the CLI)"
     Write-Host "  [4] DeepSeek    (pick a DeepSeek model from your account, then start the CLI)"
     Write-Host "  [5] Kimi        (pick a Kimi model from your account, then start the CLI)"
+    Write-Host "  [6] Local       (LM Studio on this machine, then start the CLI)"
     Write-Host ""
     $choice = Read-Host "  Choice [$defaultChoice]"
     if ([string]::IsNullOrWhiteSpace($choice)) { $choice = $defaultChoice }
@@ -215,6 +275,8 @@ function Select-Provider {
         "deepseek" { return "deepseek" }
         "5" { return "kimi" }
         "kimi" { return "kimi" }
+        "6" { return "local" }
+        "local" { return "local" }
         default { return "openrouter" }
     }
 }
@@ -230,6 +292,8 @@ function Test-ProviderKey {
         & (Join-Path $RepoRoot "validate-deepseek.ps1")
     } elseif ($SelectedProvider -eq "kimi") {
         & (Join-Path $RepoRoot "validate-kimi.ps1")
+    } elseif ($SelectedProvider -eq "local") {
+        & (Join-Path $RepoRoot "validate-lmstudio.ps1")
     } else {
         & (Join-Path $RepoRoot "validate-openrouter.ps1")
     }
@@ -247,6 +311,8 @@ function Invoke-ProviderKeyPrompt {
         & (Join-Path $RepoRoot "set-deepseek-key.ps1")
     } elseif ($SelectedProvider -eq "kimi") {
         & (Join-Path $RepoRoot "set-kimi-key.ps1")
+    } elseif ($SelectedProvider -eq "local") {
+        & (Join-Path $RepoRoot "set-lmstudio-settings.ps1")
     } else {
         & (Join-Path $RepoRoot "set-openrouter-key.ps1")
     }
@@ -297,6 +363,69 @@ function Ensure-ProviderCredentials {
             Write-Host ""
             Write-Host "  The key was entered, but .env did not save it correctly." -ForegroundColor Red
             return $false
+        }
+    }
+
+    return $false
+}
+
+function Ensure-LocalLmStudioSettings {
+    for ($try = 1; $try -le $MaxKeyTries; $try++) {
+        $dotenv = Read-RepoDotEnv -Path $DotEnvPath
+
+        if (Test-HasSavedLocalSettings -DotEnv $dotenv) {
+            $base = Get-LocalBaseUrlFromDotEnv -DotEnv $dotenv
+            $model = Get-LocalModelFromDotEnv -DotEnv $dotenv
+            Write-Host ""
+            Write-Host "  Saved LM Studio settings:" -ForegroundColor DarkGray
+            Write-Host ("    Base URL: {0}" -f $base) -ForegroundColor DarkGray
+            Write-Host ("    Model:    {0}" -f $model) -ForegroundColor DarkGray
+            Write-Host ""
+            $useSaved = Read-Host "  Would you like to use saved settings? [Y/n]"
+            if ($useSaved -notmatch '^[Nn]') {
+                $code = Test-ProviderKey -SelectedProvider "local"
+                if ($code -eq 0) { return $true }
+                if ($code -eq 3) {
+                    Write-Host ""
+                    Write-Host "  Continuing with a network warning so ClawCodex can show more diagnostics." -ForegroundColor Yellow
+                    return $true
+                }
+                Write-Host ""
+                Write-Host "  Saved LM Studio settings did not connect." -ForegroundColor Yellow
+            } else {
+                Write-Host ""
+                Write-Host "  Enter new LM Studio settings." -ForegroundColor Cyan
+            }
+        } else {
+            Write-Host ""
+            Write-Host "  No saved LM Studio settings yet." -ForegroundColor Yellow
+        }
+
+        if ($try -ge $MaxKeyTries) {
+            Write-Host ""
+            Write-Host "  Stopping after $MaxKeyTries LM Studio setup attempts." -ForegroundColor Red
+            return $false
+        }
+
+        Write-Host ""
+        $setCode = Invoke-ProviderKeyPrompt -SelectedProvider "local"
+        if ($setCode -eq 1) {
+            Write-Host ""
+            Write-Host "  LM Studio setup was cancelled." -ForegroundColor Yellow
+            return $false
+        }
+        if ($setCode -ne 0) {
+            Write-Host ""
+            Write-Host "  LM Studio settings were not saved correctly." -ForegroundColor Red
+            continue
+        }
+
+        $code = Test-ProviderKey -SelectedProvider "local"
+        if ($code -eq 0) { return $true }
+        if ($code -eq 3) {
+            Write-Host ""
+            Write-Host "  Continuing with a network warning so ClawCodex can show more diagnostics." -ForegroundColor Yellow
+            return $true
         }
     }
 
@@ -410,6 +539,28 @@ function Apply-LaunchEnvironment {
         }
     }
 
+    if ($SelectedProvider -eq "local") {
+        $base = Get-LocalBaseUrlFromDotEnv -DotEnv $DotEnv
+        if ([string]::IsNullOrWhiteSpace($base)) { $base = $DefaultLmStudioBase }
+        $key = Get-LocalApiKeyFromDotEnv -DotEnv $DotEnv
+        $model = Get-LocalModelFromDotEnv -DotEnv $DotEnv
+        if ([string]::IsNullOrWhiteSpace($model)) { $model = "local-model" }
+
+        $env:OPENAI_BASE_URL = $base
+        $env:OPENAI_API_KEY = $key
+        $env:LMSTUDIO_BASE_URL = $base
+        $env:LMSTUDIO_API_KEY = $key
+        $env:CLAW_PROVIDER = "local"
+        $env:CLAW_SKIP_OPENROUTER_MODEL_PICKER = "1"
+        $env:CLAW_NO_CREDENTIAL_PROMPT = "1"
+
+        return @{
+            ExplicitModel = $model
+            ClawArgs        = @("--model", $model)
+            SkipDoctor      = $true
+        }
+    }
+
     Remove-Item Env:CLAW_SKIP_OPENROUTER_MODEL_PICKER -ErrorAction SilentlyContinue
     Remove-Item Env:CLAW_NO_CREDENTIAL_PROMPT -ErrorAction SilentlyContinue
     $env:CLAW_PROVIDER = "openrouter"
@@ -463,7 +614,14 @@ if ([string]::IsNullOrWhiteSpace($Provider)) {
     Write-Host "  Using provider: $Provider" -ForegroundColor Cyan
 }
 
-if (-not (Ensure-ProviderCredentials -SelectedProvider $Provider)) {
+if ($Provider -eq "local") {
+    if (-not (Ensure-LocalLmStudioSettings)) {
+        Write-Host ""
+        Write-Host "  ClawCodex will not launch until LM Studio settings are saved." -ForegroundColor Yellow
+        Write-Host "  Run START-CLAW.bat again when ready." -ForegroundColor Yellow
+        exit 1
+    }
+} elseif (-not (Ensure-ProviderCredentials -SelectedProvider $Provider)) {
     Write-Host ""
     Write-Host "  ClawCodex will not launch until a valid key is saved." -ForegroundColor Yellow
     Write-Host "  Run START-CLAW.bat again when ready." -ForegroundColor Yellow
@@ -551,7 +709,10 @@ Save-ProviderConfig `
     -DeepSeekKey $dotenv["DEEPSEEK_API_KEY"] `
     -DeepSeekModel $(if ($selectedDeepSeekModel) { $selectedDeepSeekModel } elseif ($dotenv["CLAW_DEEPSEEK_MODEL"]) { $dotenv["CLAW_DEEPSEEK_MODEL"] } else { $DefaultDeepSeekModel }) `
     -KimiKey $(if ($dotenv["KIMI_API_KEY"]) { $dotenv["KIMI_API_KEY"] } elseif ($dotenv["MOONSHOT_API_KEY"]) { $dotenv["MOONSHOT_API_KEY"] } else { $null }) `
-    -KimiModel $(if ($selectedKimiModel) { $selectedKimiModel } elseif ($dotenv["CLAW_KIMI_MODEL"]) { $dotenv["CLAW_KIMI_MODEL"] } else { $DefaultKimiModel })
+    -KimiModel $(if ($selectedKimiModel) { $selectedKimiModel } elseif ($dotenv["CLAW_KIMI_MODEL"]) { $dotenv["CLAW_KIMI_MODEL"] } else { $DefaultKimiModel }) `
+    -LocalBaseUrl $(Get-LocalBaseUrlFromDotEnv -DotEnv $dotenv) `
+    -LocalApiKey $(Get-LocalApiKeyFromDotEnv -DotEnv $dotenv) `
+    -LocalModel $(Get-LocalModelFromDotEnv -DotEnv $dotenv)
 
 $dotenv = Read-RepoDotEnv -Path $DotEnvPath
 $launch = Apply-LaunchEnvironment -SelectedProvider $Provider -DotEnv $dotenv
@@ -559,6 +720,9 @@ $launch = Apply-LaunchEnvironment -SelectedProvider $Provider -DotEnv $dotenv
 Write-Host ""
 if ($Provider -eq "openrouter") {
     Write-Host "  OpenRouter key OK. Next: pick a tool-capable model, then enter the ClawCodex REPL." -ForegroundColor Green
+} elseif ($Provider -eq "local") {
+    Write-Host "  LM Studio connected. Starting ClawCodex with model $($launch.ExplicitModel)." -ForegroundColor Green
+    Write-Host "  (Using saved local LM Studio settings.)" -ForegroundColor DarkGray
 } elseif ($Provider -eq "zai") {
     Write-Host "  Z.ai key OK. Starting ClawCodex with model $($launch.ExplicitModel)." -ForegroundColor Green
     Write-Host "  (Selected from live Z.ai /models list, filtered to GLM models.)" -ForegroundColor DarkGray
@@ -573,7 +737,7 @@ if ($Provider -eq "openrouter") {
     Write-Host "  (Selected from live Cerebras /v1/models list.)" -ForegroundColor DarkGray
 }
 
-if ($Provider -eq "cerebras" -or $Provider -eq "zai" -or $Provider -eq "deepseek" -or $Provider -eq "kimi") {
+if ($Provider -eq "cerebras" -or $Provider -eq "zai" -or $Provider -eq "deepseek" -or $Provider -eq "kimi" -or $Provider -eq "local") {
     Write-Host ""
     Write-Host "  Skipping ClawCodex doctor for non-OpenRouter launch - starting the REPL directly." -ForegroundColor DarkGray
 } elseif (-not $SkipDoctor) {
