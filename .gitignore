@@ -16,3 +16,7 @@ rust/target/
 
 # Packaged Windows CLI for this distribution (tracked on purpose)
 # bin/windows/claw.exe is committed so users can run without compiling.
+
+# Saved local AI-agent conversations
+/rust/.claude/sessions/
+/rust/.claw/sessions/
