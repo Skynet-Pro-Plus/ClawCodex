@@ -78,3 +78,7 @@ pacman_build.log
 # Scratch suggestion files
 suggest.txt
 suggestions_*.txt
+
+# Saved local AI-agent conversations
+/rust/.claude/sessions/
+/rust/.claw/sessions/
